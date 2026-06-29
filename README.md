@@ -21,7 +21,9 @@ Grâce à une machine d'état conversationnelle séquentielle et une interaction
 
 ## 📦 Installation
 
-Ce projet est une extension VS Code complète (`.vsix`). Pour l'installer instantanément sur votre poste sans passer par le Marketplace public, ouvrez un terminal **PowerShell** et exécutez la commande unique suivante :
+Ce projet est une extension VS Code complète (`.vsix`). Pour l'installer instantanément sur votre poste sans passer par le Marketplace public, ouvrez un terminal **PowerShell** et exécutez le bloc de commandes suivant :
 
 ```powershell
-Invoke-WebRequest -Uri "[https://github.com/Atom-CG/ExperteesDeployAgent/releases/latest/download/experdeploy.vsix](https://github.com/Atom-CG/ExperteesDeployAgent/releases/latest/download/experdeploy.vsix)" -OutFile "$env:TEMP\experdeploy.vsix"; code --install-extension "$env:TEMP\experdeploy.vsix"; Remove-Item "$env:TEMP\experdeploy.vsix"
+Invoke-WebRequest -Uri "[https://github.com/Atom-CG/ExperteesDeployAgent/releases/latest/download/experdeploy.vsix](https://github.com/Atom-CG/ExperteesDeployAgent/releases/latest/download/experdeploy.vsix)" -OutFile "$env:TEMP\experdeploy.vsix"
+code --install-extension "$env:TEMP\experdeploy.vsix"
+Remove-Item "$env:TEMP\experdeploy.vsix"

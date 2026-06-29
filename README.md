@@ -15,11 +15,7 @@ Grâce à une machine d'état conversationnelle et une intégration profonde ave
 
 Ce projet est une extension VS Code complète (`.vsix`). Pour l'intégrer automatiquement à vos projets d'équipe, ajoutez-la aux recommandations de votre workspace :
 
-```json
-// .vscode/extensions.json
-{
-  "recommendations": [
-    "expertime.experdeploy",
-    "github.copilot-chat"
-  ]
-}
+```powershell
+Invoke-WebRequest -Uri "https://github.com/Atom-CG/ExperteesDeployAgent/releases/latest/download/experdeploy.vsix" -OutFile "$env:TEMP\experdeploy.vsix"; code --install-extension "$env:TEMP\experdeploy.vsix"; Remove-Item "$env:TEMP\experdeploy.vsix"
+```
+

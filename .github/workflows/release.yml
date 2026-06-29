@@ -3,7 +3,7 @@ name: Publish Release
 on:
   push:
     tags:
-      - 'v*' # Se déclenche uniquement quand tu pousses un tag qui commence par v (ex: v1.0.0)
+      - 'v*' # Se déclenche à chaque tag v1.0.0, v0.0.2, etc.
 
 jobs:
   build_and_release:
@@ -22,11 +22,15 @@ jobs:
         run: npm ci
 
       - name: Compilation du package VSIX
-        run: npx vsce package
+        run: npx @vscode/vsce package
+
+      # --- ÉTAPE AJOUTÉE POUR L'OPTION A ---
+      - name: Renommer le package pour URL fixe
+        run: mv *.vsix experdeploy.vsix
 
       - name: Création de la Release GitHub
         uses: softprops/action-gh-release@v2
         with:
-          files: '*.vsix'
+          files: 'experdeploy.vsix' # On cible uniquement le fichier renommé
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Géré automatiquement par GitHub
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -642,11 +642,12 @@ fs.writeFileSync('tailwind.config.js', "module.exports = { content: ['./index.ht
       const setupBase64 = Buffer.from(setupJs).toString("base64");
 
       // Exécution silencieuse du patch avant l'appel aux CLI
-      const prepareEnvCmds = [
-        `[IO.File]::WriteAllBytes('expertees-setup.js', [Convert]::FromBase64String('${setupBase64}'))`,
-        `node expertees-setup.js`,
-        `Remove-Item expertees-setup.js`,
-      ];
+            // On utilise .cjs pour contourner le "type": "module" de Vite
+            const prepareEnvCmds = [
+                `[IO.File]::WriteAllBytes('expertees-setup.cjs', [Convert]::FromBase64String('${setupBase64}'))`,
+                `node expertees-setup.cjs`,
+                `Remove-Item expertees-setup.cjs`
+            ];
 
       if (framework === "react") {
         descriptionStack =

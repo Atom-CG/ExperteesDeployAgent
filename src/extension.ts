@@ -367,7 +367,7 @@ async function gererRequete(
                 stream.markdown('| **Build** | Vite 7 + vue-tsc |\n');
                 stream.markdown('| **État** | Pinia (setup stores) |\n');
                 stream.markdown('| **Routing** | vue-router 5 — `createWebHashHistory` |\n');
-                stream.markdown('| **UI** | shadcn-vue New York + Tailwind CSS v4 |\n');
+                stream.markdown('| **UI** | shadcn-vue Vega + Tailwind CSS v4 |\n');
                 stream.markdown('| **URLs** | Relatives uniquement |\n\n');
                 stream.markdown('---\n\n');
                 stream.markdown('**Que souhaitez-vous faire ?**\n\n');
@@ -508,14 +508,14 @@ async function gererRequete(
                     ];
                 }
             } else {
-                descriptionStack = 'Vue 3.5 + Vite 7 + Pinia + vue-router 5 + Tailwind CSS v4 + shadcn-vue (New York)';
+                descriptionStack = 'Vue 3.5 + Vite 7 + Pinia + vue-router 5 + Tailwind CSS v4 + shadcn-vue (Vega)';
                 if (enDansDossier) {
                     commandesInit = [
                         `npm create vite@latest . -- --template vue-ts`,
                         `npm install`,
                         `npm install pinia vue-router@5`,
                         `npm install -D tailwindcss @tailwindcss/vite`,
-                        `npx shadcn-vue@latest init --style new-york --defaults`
+                        `npx shadcn-vue@latest init --style vega --defaults`
                     ];
                 } else {
                     commandesInit = [
@@ -523,7 +523,7 @@ async function gererRequete(
                         `Set-Location "${session.nomProjet}"; npm install`,
                         `npm install pinia vue-router@5`,
                         `npm install -D tailwindcss @tailwindcss/vite`,
-                        `npx shadcn-vue@latest init --style new-york --defaults`,
+                        `npx shadcn-vue@latest init --style vega --defaults`,
                         `code .`
                     ];
                 }

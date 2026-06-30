@@ -605,20 +605,20 @@ async function gererRequete(
     }
 
     // --- PHASE INIT PROJET : NOM & SCAFFOLD ---
-    case "INIT_NOM_PROJET": {
-      if (!messageUtilisateur) break;
-      session.nomProjet = messageUtilisateur.trim();
+        case 'INIT_NOM_PROJET': {
+            if (!messageUtilisateur) break;
+            session.nomProjet = messageUtilisateur.trim();
 
-      const workspaceFolders = vscode.workspace.workspaceFolders;
-      const enDansDossier = workspaceFolders && workspaceFolders.length > 0;
-      const framework = session.frameworkChoisi || "vue";
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            const enDansDossier = workspaceFolders && workspaceFolders.length > 0;
+            const framework = session.frameworkChoisi || 'vue';
 
-      let commandesInit: string[];
-      let descriptionStack: string;
+            let commandesInit: string[];
+            let descriptionStack: string;
 
-      // 🧠 SCRIPT NODE.JS INLINE POUR PRÉPARER L'ENVIRONNEMENT (HEADLESS)
-      // L'encodage Base64 évite tous les conflits de guillemets dans le terminal PowerShell
-      const setupJs = `
+            // 🧠 SCRIPT NODE.JS INLINE POUR PRÉPARER L'ENVIRONNEMENT (HEADLESS)
+            // L'encodage Base64 évite tous les conflits de guillemets dans le terminal PowerShell
+            const setupJs = `
 const fs = require('fs');
 const tsFile = fs.existsSync('tsconfig.app.json') ? 'tsconfig.app.json' : 'tsconfig.json';
 if (fs.existsSync(tsFile)) {
@@ -639,100 +639,97 @@ if (fs.existsSync(viteFile)) {
 }
 fs.writeFileSync('tailwind.config.js', "module.exports = { content: ['./index.html', './src/**/*.{js,ts,jsx,tsx,vue}'], theme: { extend: {} }, plugins: [] };");
             `.trim();
-      const setupBase64 = Buffer.from(setupJs).toString("base64");
-
-      // Exécution silencieuse du patch avant l'appel aux CLI
-            // On utilise .cjs pour contourner le "type": "module" de Vite
+            const setupBase64 = Buffer.from(setupJs).toString('base64');
+            
+            // Exécution silencieuse du patch avant l'appel aux CLI (format .cjs pour forcer CommonJS)
             const prepareEnvCmds = [
                 `[IO.File]::WriteAllBytes('expertees-setup.cjs', [Convert]::FromBase64String('${setupBase64}'))`,
                 `node expertees-setup.cjs`,
                 `Remove-Item expertees-setup.cjs`
             ];
 
-      if (framework === "react") {
-        descriptionStack =
-          "React 19 + Vite 7 + React Router v7 + Zustand + Tailwind CSS v4 + shadcn/ui";
+            // 🛑 Activation du mode CI pour forcer Vite à passer les questions interactives
+            // et empêcher le lancement automatique du serveur de dev.
+            const cmdViteInitDir = `$env:CI='true'; npm create vite@latest . --yes -- --template`;
+            const cmdViteInitProj = `$env:CI='true'; npm create vite@latest "${session.nomProjet}" --yes -- --template`;
 
-        const baseCmds = [
-          `npm install react-router-dom@7 zustand`,
-          `npm install -D tailwindcss @tailwindcss/vite @types/node`,
-          ...prepareEnvCmds,
-          `npx shadcn@latest init -d`, // -d = defaults (installation silencieuse)
-        ];
+            if (framework === 'react') {
+                descriptionStack = 'React 19 + Vite 7 + React Router v7 + Zustand + Tailwind CSS v4 + shadcn/ui';
+                
+                const baseCmds = [
+                    `$env:CI=$null`, // On retire le mode CI pour la suite
+                    `npm install react-router-dom@7 zustand`,
+                    `npm install -D tailwindcss @tailwindcss/vite @types/node`,
+                    ...prepareEnvCmds,
+                    `npx shadcn@latest init -d`
+                ];
 
-        if (enDansDossier) {
-          commandesInit = [
-            `npm create vite@latest . -- --template react-ts`,
-            `npm install`,
-            ...baseCmds,
-          ];
-        } else {
-          commandesInit = [
-            `npm create vite@latest "${session.nomProjet}" -- --template react-ts`,
-            `Set-Location "${session.nomProjet}"; npm install`,
-            ...baseCmds,
-            `code .`,
-          ];
+                if (enDansDossier) {
+                    commandesInit = [
+                        `${cmdViteInitDir} react-ts`,
+                        `npm install`,
+                        ...baseCmds
+                    ];
+                } else {
+                    commandesInit = [
+                        `${cmdViteInitProj} react-ts`,
+                        `Set-Location "${session.nomProjet}"; npm install`,
+                        ...baseCmds,
+                        `code .`
+                    ];
+                }
+            } else if (framework === 'angular') {
+                descriptionStack = 'Angular 19 + Angular Router + NgRx Signals + Tailwind CSS v4';
+                
+                if (enDansDossier) {
+                    commandesInit = [
+                        `npx @angular/cli@latest new "${session.nomProjet}" --routing --style=css --skip-git --directory . --defaults`,
+                        `npm install -D tailwindcss @tailwindcss/postcss`
+                    ];
+                } else {
+                    commandesInit = [
+                        `npx @angular/cli@latest new "${session.nomProjet}" --routing --style=css --skip-git --defaults`,
+                        `Set-Location "${session.nomProjet}"; npm install -D tailwindcss @tailwindcss/postcss`,
+                        `code .`
+                    ];
+                }
+            } else {
+                descriptionStack = 'Vue 3.5 + Vite 7 + Pinia + vue-router 5 + Tailwind CSS v4 + shadcn-vue (Vega)';
+                
+                const baseCmds = [
+                    `$env:CI=$null`, // Désactivation du mode CI
+                    `npm install pinia vue-router@5`,
+                    `npm install -D tailwindcss @tailwindcss/vite @types/node`,
+                    ...prepareEnvCmds,
+                    `npx shadcn-vue@latest init -d --style vega`
+                ];
+
+                if (enDansDossier) {
+                    commandesInit = [
+                        `${cmdViteInitDir} vue-ts`,
+                        `npm install`,
+                        ...baseCmds
+                    ];
+                } else {
+                    commandesInit = [
+                        `${cmdViteInitProj} vue-ts`,
+                        `Set-Location "${session.nomProjet}"; npm install`,
+                        ...baseCmds,
+                        `code .`
+                    ];
+                }
+            }
+
+            stream.markdown(`🏗️ **Création du projet \`${session.nomProjet}\` — ${descriptionStack}**\n\n`);
+            if (enDansDossier) {
+                stream.markdown('> 📂 Installation dans le dossier de workspace actuel.\n\n');
+            }
+            stream.markdown('> ⚙️ Configuration automatisée en cours (fichiers, alias et UI)...\n\n');
+
+            executerScriptSecurise(commandesInit);
+            reinitialiserSession(threadId);
+            break;
         }
-      } else if (framework === "angular") {
-        descriptionStack =
-          "Angular 19 + Angular Router + NgRx Signals + Tailwind CSS v4";
-
-        if (enDansDossier) {
-          commandesInit = [
-            `npx @angular/cli@latest new "${session.nomProjet}" --routing --style=css --skip-git --directory .`,
-            `npm install -D tailwindcss @tailwindcss/postcss`,
-          ];
-        } else {
-          commandesInit = [
-            `npx @angular/cli@latest new "${session.nomProjet}" --routing --style=css --skip-git`,
-            `Set-Location "${session.nomProjet}"; npm install -D tailwindcss @tailwindcss/postcss`,
-            `code .`,
-          ];
-        }
-      } else {
-        descriptionStack =
-          "Vue 3.5 + Vite 7 + Pinia + vue-router 5 + Tailwind CSS v4 + shadcn-vue (Vega)";
-
-        const baseCmds = [
-          `npm install pinia vue-router@5`,
-          `npm install -D tailwindcss @tailwindcss/vite @types/node`,
-          ...prepareEnvCmds,
-          `npx shadcn-vue@latest init -d --style vega`, // -d force le silent run
-        ];
-
-        if (enDansDossier) {
-          commandesInit = [
-            `npm create vite@latest . -- --template vue-ts`,
-            `npm install`,
-            ...baseCmds,
-          ];
-        } else {
-          commandesInit = [
-            `npm create vite@latest "${session.nomProjet}" -- --template vue-ts`,
-            `Set-Location "${session.nomProjet}"; npm install`,
-            ...baseCmds,
-            `code .`,
-          ];
-        }
-      }
-
-      stream.markdown(
-        `🏗️ **Création du projet \`${session.nomProjet}\` — ${descriptionStack}**\n\n`,
-      );
-      if (enDansDossier) {
-        stream.markdown(
-          "> 📂 Installation dans le dossier de workspace actuel.\n\n",
-        );
-      }
-      stream.markdown(
-        "> ⚙️ Configuration automatisée en cours (fichiers, alias et UI)...\n\n",
-      );
-
-      executerScriptSecurise(commandesInit);
-      reinitialiserSession(threadId);
-      break;
-    }
 
     // --- PHASE EXPORT ---
     case "EXPORT_NOM_SOLUTION": {

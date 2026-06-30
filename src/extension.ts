@@ -616,71 +616,92 @@ async function gererRequete(
             let commandesInit: string[];
             let descriptionStack: string;
 
-            // 🧠 SCRIPT NODE.JS INLINE POUR PRÉPARER L'ENVIRONNEMENT (HEADLESS)
-            // L'encodage Base64 évite tous les conflits de guillemets dans le terminal PowerShell
+            // 🧠 SCRIPT NODE.JS "MAGIQUE" POUR VITE
+            // Exécute create-vite sans TTY (bloque l'assistant) et applique les patchs
             const setupJs = `
 const fs = require('fs');
-const tsFile = fs.existsSync('tsconfig.app.json') ? 'tsconfig.app.json' : 'tsconfig.json';
-if (fs.existsSync(tsFile)) {
-    let ts = fs.readFileSync(tsFile, 'utf8');
-    if (!ts.includes('"baseUrl"')) {
-        ts = ts.replace('"compilerOptions": {', '"compilerOptions": {\\n    "baseUrl": ".",\\n    "paths": { "@/*": ["./src/*"] },');
-        fs.writeFileSync(tsFile, ts);
+const { execSync } = require('child_process');
+const target = process.argv[2] || '.';
+const template = process.argv[3] || 'vue-ts';
+
+try {
+    console.log('\\n⚡ Initialisation de Vite (mode silencieux strict)...');
+    // Le secret est ici : stdio 'ignore' simule l'absence de clavier.
+    // Vite ne PEUT PAS poser de questions et ne lancera pas npm run dev.
+    execSync('npm create vite@latest "' + target + '" --yes -- --template ' + template, { 
+        stdio: ['ignore', 'inherit', 'inherit'] 
+    });
+
+    // Déplacement dans le dossier créé (si applicable) pour modifier les fichiers
+    if (target !== '.') {
+        process.chdir(target);
     }
-}
-const viteFile = 'vite.config.ts';
-if (fs.existsSync(viteFile)) {
-    let vc = fs.readFileSync(viteFile, 'utf8');
-    if (!vc.includes('alias')) {
-        vc = "import path from 'path';\\n" + vc;
-        vc = vc.replace(/plugins:\\s*\\[([^\\]]+)\\]/, "plugins: [$1],\\n  resolve: { alias: { '@': path.resolve(__dirname, './src') } }");
-        fs.writeFileSync(viteFile, vc);
+
+    console.log('🔧 Application des patchs Expertime...');
+    const tsFile = fs.existsSync('tsconfig.app.json') ? 'tsconfig.app.json' : 'tsconfig.json';
+    if (fs.existsSync(tsFile)) {
+        let ts = fs.readFileSync(tsFile, 'utf8');
+        if (!ts.includes('"baseUrl"')) {
+            ts = ts.replace('"compilerOptions": {', '"compilerOptions": {\\n    "baseUrl": ".",\\n    "paths": { "@/*": ["./src/*"] },');
+            fs.writeFileSync(tsFile, ts);
+        }
     }
+
+    const viteFile = 'vite.config.ts';
+    if (fs.existsSync(viteFile)) {
+        let vc = fs.readFileSync(viteFile, 'utf8');
+        if (!vc.includes('alias')) {
+            vc = "import path from 'path';\\n" + vc;
+            vc = vc.replace('plugins: [vue()]', "plugins: [vue()],\\n  resolve: { alias: { '@': path.resolve(__dirname, './src') } }");
+            vc = vc.replace('plugins: [react()]', "plugins: [react()],\\n  resolve: { alias: { '@': path.resolve(__dirname, './src') } }");
+            fs.writeFileSync(viteFile, vc);
+        }
+    }
+
+    fs.writeFileSync('tailwind.config.js', "module.exports = { content: [], theme: { extend: {} }, plugins: [] };");
+    console.log('✅ Fichiers prêts.\\n');
+} catch (e) {
+    console.error('❌ Erreur Node:', e.message);
+    process.exit(1);
 }
-fs.writeFileSync('tailwind.config.js', "module.exports = { content: ['./index.html', './src/**/*.{js,ts,jsx,tsx,vue}'], theme: { extend: {} }, plugins: [] };");
             `.trim();
-            const setupBase64 = Buffer.from(setupJs).toString('base64');
             
-            // Exécution silencieuse du patch avant l'appel aux CLI (format .cjs pour forcer CommonJS)
-            const prepareEnvCmds = [
+            // Encodage Base64 dynamique à la volée
+            const setupBase64 = Buffer.from(setupJs).toString('base64');
+
+            // Génération du fichier temporaire .cjs et exécution (avec passage du dossier et du template)
+            const prepareAndScaffold = (cible: string, template: string) => [
                 `[IO.File]::WriteAllBytes('expertees-setup.cjs', [Convert]::FromBase64String('${setupBase64}'))`,
-                `node expertees-setup.cjs`,
+                `node expertees-setup.cjs "${cible}" "${template}"`,
                 `Remove-Item expertees-setup.cjs`
             ];
-
-            // 🛑 Activation du mode CI pour forcer Vite à passer les questions interactives
-            // et empêcher le lancement automatique du serveur de dev.
-            const cmdViteInitDir = `$env:CI='true'; npm create vite@latest . --yes -- --template`;
-            const cmdViteInitProj = `$env:CI='true'; npm create vite@latest "${session.nomProjet}" --yes -- --template`;
 
             if (framework === 'react') {
                 descriptionStack = 'React 19 + Vite 7 + React Router v7 + Zustand + Tailwind CSS v4 + shadcn/ui';
                 
-                const baseCmds = [
-                    `$env:CI=$null`, // On retire le mode CI pour la suite
+                const suiteCmds = [
+                    `npm install`,
                     `npm install react-router-dom@7 zustand`,
                     `npm install -D tailwindcss @tailwindcss/vite @types/node`,
-                    ...prepareEnvCmds,
                     `npx shadcn@latest init -d`
                 ];
 
                 if (enDansDossier) {
                     commandesInit = [
-                        `${cmdViteInitDir} react-ts`,
-                        `npm install`,
-                        ...baseCmds
+                        ...prepareAndScaffold('.', 'react-ts'),
+                        ...suiteCmds
                     ];
                 } else {
                     commandesInit = [
-                        `${cmdViteInitProj} react-ts`,
-                        `Set-Location "${session.nomProjet}"; npm install`,
-                        ...baseCmds,
+                        ...prepareAndScaffold(session.nomProjet, 'react-ts'),
+                        `Set-Location "${session.nomProjet}"`,
+                        ...suiteCmds,
                         `code .`
                     ];
                 }
             } else if (framework === 'angular') {
+                // Angular garde l'approche classique car @angular/cli a un flag --defaults parfait
                 descriptionStack = 'Angular 19 + Angular Router + NgRx Signals + Tailwind CSS v4';
-                
                 if (enDansDossier) {
                     commandesInit = [
                         `npx @angular/cli@latest new "${session.nomProjet}" --routing --style=css --skip-git --directory . --defaults`,
@@ -696,25 +717,23 @@ fs.writeFileSync('tailwind.config.js', "module.exports = { content: ['./index.ht
             } else {
                 descriptionStack = 'Vue 3.5 + Vite 7 + Pinia + vue-router 5 + Tailwind CSS v4 + shadcn-vue (Vega)';
                 
-                const baseCmds = [
-                    `$env:CI=$null`, // Désactivation du mode CI
+                const suiteCmds = [
+                    `npm install`,
                     `npm install pinia vue-router@5`,
                     `npm install -D tailwindcss @tailwindcss/vite @types/node`,
-                    ...prepareEnvCmds,
                     `npx shadcn-vue@latest init -d --style vega`
                 ];
 
                 if (enDansDossier) {
                     commandesInit = [
-                        `${cmdViteInitDir} vue-ts`,
-                        `npm install`,
-                        ...baseCmds
+                        ...prepareAndScaffold('.', 'vue-ts'),
+                        ...suiteCmds
                     ];
                 } else {
                     commandesInit = [
-                        `${cmdViteInitProj} vue-ts`,
-                        `Set-Location "${session.nomProjet}"; npm install`,
-                        ...baseCmds,
+                        ...prepareAndScaffold(session.nomProjet, 'vue-ts'),
+                        `Set-Location "${session.nomProjet}"`,
+                        ...suiteCmds,
                         `code .`
                     ];
                 }

@@ -649,27 +649,58 @@ try {
     }
 
     console.log('🔧 Application des patchs Expertime...');
-    const tsFile = fs.existsSync('tsconfig.app.json') ? 'tsconfig.app.json' : 'tsconfig.json';
-    if (fs.existsSync(tsFile)) {
-        let ts = fs.readFileSync(tsFile, 'utf8');
-        if (!ts.includes('"baseUrl"')) {
+    // shadcn/shadcn-vue lisent les alias de chemin dans le tsconfig.json RACINE (pas seulement
+    // tsconfig.app.json) : sans "baseUrl"/"paths" à la racine, l'init échoue avec "Could not load
+    // the workspace config ... configure its path aliases". Il faut donc patcher les DEUX fichiers.
+    function patchTsconfig(file) {
+        if (!fs.existsSync(file)) { return; }
+        let ts = fs.readFileSync(file, 'utf8');
+        if (ts.includes('"baseUrl"')) { return; }
+        if (ts.includes('"compilerOptions": {')) {
             ts = ts.replace('"compilerOptions": {', '"compilerOptions": {\\n    "baseUrl": ".",\\n    "paths": { "@/*": ["./src/*"] },');
-            fs.writeFileSync(tsFile, ts);
+        } else {
+            // tsconfig.json racine de type "solution" (juste files/references, pas de compilerOptions)
+            const idx = ts.indexOf('{');
+            ts = ts.slice(0, idx + 1) + '\\n  "compilerOptions": {\\n    "baseUrl": ".",\\n    "paths": { "@/*": ["./src/*"] }\\n  },' + ts.slice(idx + 1);
         }
+        fs.writeFileSync(file, ts);
     }
+    patchTsconfig('tsconfig.json');
+    patchTsconfig('tsconfig.app.json');
 
     const viteFile = 'vite.config.ts';
     if (fs.existsSync(viteFile)) {
         let vc = fs.readFileSync(viteFile, 'utf8');
+        const importsToAdd = [];
         if (!vc.includes('alias')) {
-            vc = "import path from 'path';\\n" + vc;
+            importsToAdd.push("import path from 'path';");
             vc = vc.replace('plugins: [vue()]', "plugins: [vue()],\\n  resolve: { alias: { '@': path.resolve(__dirname, './src') } }");
             vc = vc.replace('plugins: [react()]', "plugins: [react()],\\n  resolve: { alias: { '@': path.resolve(__dirname, './src') } }");
-            fs.writeFileSync(viteFile, vc);
+        }
+        // Enregistrement du plugin Tailwind CSS v4 (@tailwindcss/vite) — requis pour que
+        // shadcn/shadcn-vue détectent une installation Tailwind valide (voir get-project-info.ts).
+        if (!vc.includes('@tailwindcss/vite')) {
+            importsToAdd.push("import tailwindcss from '@tailwindcss/vite';");
+            vc = vc.replace(/plugins: \\[(vue\\(\\)|react\\(\\))\\]/, 'plugins: [$1, tailwindcss()]');
+        }
+        if (importsToAdd.length) {
+            vc = importsToAdd.join('\\n') + '\\n' + vc;
+        }
+        fs.writeFileSync(viteFile, vc);
+    }
+
+    // Injection de la directive Tailwind CSS v4 dans le fichier CSS d'entrée.
+    // shadcn/shadcn-vue exigent un fichier CSS contenant @import "tailwindcss";
+    // pour détecter une configuration Tailwind valide, sinon : "No Tailwind CSS configuration found".
+    const cssFile = ['src/index.css', 'src/style.css'].find((f) => fs.existsSync(f));
+    if (cssFile) {
+        let css = fs.readFileSync(cssFile, 'utf8');
+        if (!css.includes('@import "tailwindcss"')) {
+            css = '@import "tailwindcss";\\n\\n' + css;
+            fs.writeFileSync(cssFile, css);
         }
     }
 
-    fs.writeFileSync('tailwind.config.js', "module.exports = { content: [], theme: { extend: {} }, plugins: [] };");
     console.log('✅ Fichiers prêts.\\n');
 } catch (e) {
     console.error('❌ Erreur Node:', e.message);

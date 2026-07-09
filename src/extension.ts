@@ -636,7 +636,10 @@ try {
     console.log('\\n⚡ Initialisation de Vite (mode silencieux strict)...');
     // Le secret est ici : stdio 'ignore' simule l'absence de clavier.
     // Vite ne PEUT PAS poser de questions et ne lancera pas npm run dev.
-    execSync('npm create vite@latest "' + target + '" --yes -- --template ' + template, { 
+    // --overwrite : évite que create-vite annule silencieusement ("Operation cancelled")
+    // quand le dossier cible n'est pas totalement vide (ex: .git, .vscode déjà présents).
+    // --no-interactive : force le mode non-interactif explicitement (ceinture + bretelles avec stdio ignore).
+    execSync('npm create vite@latest "' + target + '" --yes -- --template ' + template + ' --overwrite --no-interactive', { 
         stdio: ['ignore', 'inherit', 'inherit'] 
     });
 
@@ -752,6 +755,7 @@ try {
             stream.markdown(`🏗️ **Création du projet \`${session.nomProjet}\` — ${descriptionStack}**\n\n`);
             if (enDansDossier) {
                 stream.markdown('> 📂 Installation dans le dossier de workspace actuel.\n\n');
+                stream.markdown('> ⚠️ **Attention** : si ce dossier n\'est pas vide, les fichiers existants (hors `.git`) seront **supprimés** pour permettre le scaffolding Vite.\n\n');
             }
             stream.markdown('> ⚙️ Configuration automatisée en cours (fichiers, alias et UI)...\n\n');
 

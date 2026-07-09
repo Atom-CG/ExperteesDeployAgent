@@ -597,6 +597,14 @@ async function gererRequete(
       stream.markdown(
         `✅ Framework sélectionné : **${labelsFramework[session.frameworkChoisi]}**\n\n`,
       );
+      stream.markdown(
+        "> ⚠️ **Attention** : l'installation va enchaîner plusieurs commandes dans le terminal. Certaines pourront vous demander une **confirmation/acceptation manuelle** (ex : prompts npm) — surveillez le terminal et validez-les au fur et à mesure.\n\n",
+      );
+      if (session.frameworkChoisi === "vue") {
+        stream.markdown(
+          "> ⏹️ **Vue.js** : une fois le scaffolding terminé, un serveur de développement peut se lancer **automatiquement** dans le terminal. Faites **`CTRL+C`** dans le terminal pour l'arrêter afin que la suite de l'installation puisse continuer.\n\n",
+        );
+      }
       session.etat = "INIT_NOM_PROJET";
       stream.markdown(
         "Quel est le **nom du projet** ?\n> _Ex: mon-projet-pcf_",
@@ -683,7 +691,9 @@ try {
                     `npm install`,
                     `npm install react-router-dom@7 zustand`,
                     `npm install -D tailwindcss @tailwindcss/vite @types/node`,
-                    `npx shadcn@latest init -d`
+                    // -s (--silent) évite le prompt interactif "Use --force / --legacy-peer-deps"
+                    // qui bloque le script en React 19 + npm (voir https://ui.shadcn.com/docs/react-19)
+                    `npx shadcn@latest init -d -s`
                 ];
 
                 if (enDansDossier) {

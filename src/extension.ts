@@ -283,6 +283,32 @@ function sauvegarderEnvironnementDansConfig(envUrl: string): boolean {
   }
 }
 
+// Relit le dernier environnement sauvegardé (pour proposer sa réutilisation par défaut).
+function lireEnvironnementSauvegarde(): string | undefined {
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  if (!workspaceFolders || workspaceFolders.length === 0) {
+    return undefined;
+  }
+
+  const configPath = path.join(
+    workspaceFolders[0].uri.fsPath,
+    "power.config.json",
+  );
+  if (!fs.existsSync(configPath)) {
+    return undefined;
+  }
+
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    if (typeof config.selectedEnvironment === "string") {
+      return config.selectedEnvironment;
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // UTILITAIRES TERMINAL
 // ---------------------------------------------------------------------------
@@ -314,6 +340,30 @@ function executerScriptSecurise(commandes: string[]): void {
     const commandeSecurisee = `${cmd}; if ($LASTEXITCODE -ne 0) { Write-Host '❌ Arrêt du script suite à une erreur.' -ForegroundColor Red; break }`;
     terminal.sendText(commandeSecurisee);
   }
+}
+
+// Variante qui, en plus d'arrêter la chaîne de commandes à la première erreur,
+// journalise chaque erreur rencontrée (étape + code de sortie) et affiche un
+// message de bilan final (succès ou échec) une fois toutes les commandes traitées.
+function executerScriptSecuriseAvecBilan(
+  commandes: string[],
+  messageSucces: string,
+): void {
+  const terminal = obtenirOuCreerTerminal();
+  terminal.show(true);
+
+  terminal.sendText("$experdeployAbort = $false; $experdeployErreurs = @()");
+
+  commandes.forEach((cmd, index) => {
+    const etape = index + 1;
+    const commandeSecurisee = `if (-not $experdeployAbort) { ${cmd}; if ($LASTEXITCODE -ne 0) { $msg = "❌ Étape ${etape}/${commandes.length} échouée (code de sortie: $LASTEXITCODE)"; Write-Host $msg -ForegroundColor Red; $experdeployErreurs += $msg; $experdeployAbort = $true } }`;
+    terminal.sendText(commandeSecurisee);
+  });
+
+  const messageEchappe = messageSucces.replace(/'/g, "''");
+  terminal.sendText(
+    `if ($experdeployAbort) { Write-Host ''; Write-Host '❌ ${messageEchappe} — ÉCHEC' -ForegroundColor Red; Write-Host '--- Journal des erreurs ---' -ForegroundColor Red; $experdeployErreurs | ForEach-Object { Write-Host $_ -ForegroundColor Red } } else { Write-Host ''; Write-Host '✅ ${messageEchappe} — SUCCÈS' -ForegroundColor Green }`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -423,15 +473,402 @@ async function installerPrerequisCodeApp(
 }
 
 // ---------------------------------------------------------------------------
+// TRADUCTION AUTOMATIQUE (si VS Code est configuré en anglais)
+// ---------------------------------------------------------------------------
+
+/** Détecte si VS Code est affiché en anglais (ex. "en", "en-us"). */
+function langueVsCodeEstAnglaise(): boolean {
+  return vscode.env.language.toLowerCase().startsWith("en");
+}
+
+/**
+ * Enveloppe un ChatResponseStream réel : les appels à `.markdown()` sont
+ * accumulés en mémoire au lieu d'être écrits immédiatement. Permet de
+ * traduire l'intégralité de la réponse en un seul appel LLM avant affichage.
+ */
+interface StreamBufferise extends vscode.ChatResponseStream {
+  obtenirTexteAccumule(): string;
+}
+
+function creerStreamBufferise(
+  streamReel: vscode.ChatResponseStream,
+): StreamBufferise {
+  // NB : on ne peut pas utiliser un Proxy ici — les méthodes de l'objet stream
+  // fourni par VS Code sont des propriétés propres non-configurables, ce qui
+  // viole l'invariant du piège `get` d'un Proxy dès qu'on retourne une valeur
+  // différente pour `markdown`. On construit donc un objet simple qui délègue
+  // explicitement chaque méthode inutilisée au stream réel.
+  const morceaux: string[] = [];
+  return {
+    markdown: (valeur: string | vscode.MarkdownString) => {
+      morceaux.push(typeof valeur === "string" ? valeur : valeur.value);
+    },
+    anchor: (...args: Parameters<vscode.ChatResponseStream["anchor"]>) =>
+      streamReel.anchor(...args),
+    button: (...args: Parameters<vscode.ChatResponseStream["button"]>) =>
+      streamReel.button(...args),
+    filetree: (...args: Parameters<vscode.ChatResponseStream["filetree"]>) =>
+      streamReel.filetree(...args),
+    progress: (...args: Parameters<vscode.ChatResponseStream["progress"]>) =>
+      streamReel.progress(...args),
+    reference: (
+      ...args: Parameters<vscode.ChatResponseStream["reference"]>
+    ) => streamReel.reference(...args),
+    push: (...args: Parameters<vscode.ChatResponseStream["push"]>) =>
+      streamReel.push(...args),
+    obtenirTexteAccumule: () => morceaux.join(""),
+  };
+}
+
+/** Traduit un bloc de Markdown français en anglais via le modèle de langage de la requête. */
+async function traduireMarkdownEnAnglais(
+  texte: string,
+  modele: vscode.LanguageModelChat,
+  jeton: vscode.CancellationToken,
+): Promise<string> {
+  if (!texte.trim()) {
+    return texte;
+  }
+  try {
+    const messages = [
+      vscode.LanguageModelChatMessage.User(
+        "Translate the following Markdown content from French to English. " +
+          "Preserve ALL Markdown formatting exactly (tables, headings, bold, links, code blocks, emojis, line breaks). " +
+          "Only translate the natural-language French text, never touch code, commands, file paths or placeholders. " +
+          "Return ONLY the translated Markdown, with no extra commentary.\n\n---\n\n" +
+          texte,
+      ),
+    ];
+    const reponse = await modele.sendRequest(messages, {}, jeton);
+    let resultat = "";
+    for await (const fragment of reponse.text) {
+      resultat += fragment;
+    }
+    return resultat.trim() ? resultat : texte;
+  } catch {
+    // En cas d'échec (modèle indisponible, requête annulée...), on retombe sur le texte français original.
+    return texte;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// POWER APPS CODE APP — PROMPT ENVIRONNEMENT (avec réutilisation)
+// ---------------------------------------------------------------------------
+
+/** Affiche la question de l'ID d'environnement, en proposant de réutiliser le dernier connu. */
+function afficherPromptEnvironnementCodeApp(
+  stream: vscode.ChatResponseStream,
+): void {
+  stream.markdown("## 🚀 Initialisation en Power Apps Code App\n\n");
+  stream.markdown(
+    "Quel est l'**ID de votre environnement Power Platform** ?\n\n",
+  );
+  const envSauvegarde = lireEnvironnementSauvegarde();
+  if (envSauvegarde) {
+    stream.markdown(
+      `> 💡 Environnement précédent détecté : \`${envSauvegarde}\` — répondez avec un **message vide** (juste Entrée) pour le réutiliser.\n`,
+    );
+  } else {
+    stream.markdown("> _Ex : `12345678-abcd-1234-abcd-1234567890ab`_\n");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// POWER APPS CODE APP — PUSH (INNER-LOOP)
+// ---------------------------------------------------------------------------
+
+/** Compile puis pousse le Code App vers Dataverse, avec gestion des erreurs courantes. */
+function lancerPushCodeApp(
+  stream: vscode.ChatResponseStream,
+  threadId: string,
+): void {
+  stream.markdown("⬆️ **Compilation et push en cours...**\n\n");
+  stream.markdown(
+    "> 1. `npm run build` — génération du dossier `dist`\n",
+  );
+  stream.markdown(
+    "> 2. `npx power-apps push` — envoi vers Dataverse\n\n",
+  );
+
+  // Script bloc unique : build + push avec gestion d'erreur intégrée.
+  // En cas d'ApplicationNotFound, l'appId obsolète est supprimé de
+  // power.config.json et le push est relancé automatiquement.
+  const scriptPush = [
+    `& {`,
+    `Write-Host "🔨 Compilation du projet..." -ForegroundColor Cyan;`,
+    `npm run build;`,
+    `if ($LASTEXITCODE -ne 0) {`,
+    `  Write-Host "❌ Compilation échouée. Corrigez les erreurs TypeScript/Vite avant de réessayer." -ForegroundColor Red;`,
+    `  return`,
+    `};`,
+    `Write-Host "⬆️ Push vers Dataverse..." -ForegroundColor Cyan;`,
+    `$pushOut = npx power-apps push 2>&1;`,
+    `$pushOut | ForEach-Object { Write-Host $_ };`,
+    `if ($LASTEXITCODE -ne 0) {`,
+    `  $outStr = $pushOut | Out-String;`,
+    `  Write-Host "";`,
+    `  if ($outStr -match 'ApplicationNotFound|could not be found') {`,
+    `    Write-Host "⚠️ Application introuvable — appId obsolète détecté." -ForegroundColor Yellow;`,
+    `    $configPath = Join-Path (Get-Location) 'power.config.json';`,
+    `    if (Test-Path $configPath) {`,
+    `      Write-Host "🔧 Suppression de l'appId dans power.config.json..." -ForegroundColor Cyan;`,
+    `      $cfg = Get-Content $configPath -Raw | ConvertFrom-Json;`,
+    `      $cfg.PSObject.Properties.Remove('appId');`,
+    `      $cfg | ConvertTo-Json -Depth 10 | Set-Content $configPath -Encoding UTF8;`,
+    `      Write-Host "✅ appId supprimé. Nouvelle tentative de push..." -ForegroundColor Green;`,
+    `      npx power-apps push;`,
+    `      if ($LASTEXITCODE -ne 0) {`,
+    `        Write-Host "❌ Push échoué après réinitialisation de l'appId." -ForegroundColor Red;`,
+    `        Write-Host "👉 Vérifiez que vous êtes connecté au bon environnement (Code App > Initialiser)." -ForegroundColor Cyan`,
+    `      } else {`,
+    `        Write-Host "✅ Push terminé avec succès !" -ForegroundColor Green`,
+    `      }`,
+    `    } else {`,
+    `      Write-Host "❌ power.config.json introuvable dans le dossier courant." -ForegroundColor Red`,
+    `    }`,
+    `  } elseif ($outStr -match 'Unauthorized|401|auth') {`,
+    `    Write-Host "❌ Erreur d'authentification." -ForegroundColor Red;`,
+    `    Write-Host "👉 Relancez 'pac auth create --environment <ID>' dans le terminal puis retentez le push." -ForegroundColor Cyan`,
+    `  } else {`,
+    `    Write-Host "❌ Push échoué. Consultez l'erreur ci-dessus." -ForegroundColor Red`,
+    `  }`,
+    `} else {`,
+    `  Write-Host "✅ Push terminé avec succès !" -ForegroundColor Green`,
+    `}`,
+    `}`,
+  ].join(" ");
+
+  executerDansTerminal(scriptPush);
+  reinitialiserSession(threadId);
+}
+
+// ---------------------------------------------------------------------------
+// SCAFFOLD DE PROJET (Vue · React · Angular)
+// ---------------------------------------------------------------------------
+
+/** Construit la liste des commandes PowerShell à exécuter pour scaffolder le projet. */
+function construireCommandesScaffold(
+  framework: string,
+  nomProjet: string,
+  enDansDossier: boolean,
+): { commandesInit: string[]; descriptionStack: string } {
+  let commandesInit: string[];
+  let descriptionStack: string;
+
+  // 🧠 SCRIPT NODE.JS "MAGIQUE" POUR VITE
+  // Exécute create-vite sans TTY (bloque l'assistant) et applique les patchs
+  const setupJs = `
+const fs = require('fs');
+const { execSync } = require('child_process');
+const target = process.argv[2] || '.';
+const template = process.argv[3] || 'vue-ts';
+
+try {
+    console.log('\\n⚡ Initialisation de Vite (mode silencieux strict)...');
+    // Le secret est ici : stdio 'ignore' simule l'absence de clavier.
+    // Vite ne PEUT PAS poser de questions et ne lancera pas npm run dev.
+    // --overwrite : évite que create-vite annule silencieusement ("Operation cancelled")
+    // quand le dossier cible n'est pas totalement vide (ex: .git, .vscode déjà présents).
+    // --no-interactive : force le mode non-interactif explicitement (ceinture + bretelles avec stdio ignore).
+    execSync('npm create vite@latest "' + target + '" --yes -- --template ' + template + ' --overwrite --no-interactive', { 
+        stdio: ['ignore', 'inherit', 'inherit'] 
+    });
+
+    // Déplacement dans le dossier créé (si applicable) pour modifier les fichiers
+    if (target !== '.') {
+        process.chdir(target);
+    }
+
+    console.log('🔧 Application des patchs Expertime...');
+    // shadcn/shadcn-vue lisent les alias de chemin dans le tsconfig.json RACINE (pas seulement
+    // tsconfig.app.json) : sans "baseUrl"/"paths" à la racine, l'init échoue avec "Could not load
+    // the workspace config ... configure its path aliases". Il faut donc patcher les DEUX fichiers.
+    function patchTsconfig(file) {
+        if (!fs.existsSync(file)) { return; }
+        let ts = fs.readFileSync(file, 'utf8');
+        if (ts.includes('"baseUrl"')) { return; }
+        if (ts.includes('"compilerOptions": {')) {
+            ts = ts.replace('"compilerOptions": {', '"compilerOptions": {\\n    "baseUrl": ".",\\n    "paths": { "@/*": ["./src/*"] },');
+        } else {
+            // tsconfig.json racine de type "solution" (juste files/references, pas de compilerOptions)
+            const idx = ts.indexOf('{');
+            ts = ts.slice(0, idx + 1) + '\\n  "compilerOptions": {\\n    "baseUrl": ".",\\n    "paths": { "@/*": ["./src/*"] }\\n  },' + ts.slice(idx + 1);
+        }
+        fs.writeFileSync(file, ts);
+    }
+    patchTsconfig('tsconfig.json');
+    patchTsconfig('tsconfig.app.json');
+
+    const viteFile = 'vite.config.ts';
+    if (fs.existsSync(viteFile)) {
+        let vc = fs.readFileSync(viteFile, 'utf8');
+        const importsToAdd = [];
+        if (!vc.includes('alias')) {
+            importsToAdd.push("import path from 'path';");
+            vc = vc.replace('plugins: [vue()]', "plugins: [vue()],\\n  resolve: { alias: { '@': path.resolve(__dirname, './src') } }");
+            vc = vc.replace('plugins: [react()]', "plugins: [react()],\\n  resolve: { alias: { '@': path.resolve(__dirname, './src') } }");
+        }
+        // Enregistrement du plugin Tailwind CSS v4 (@tailwindcss/vite) — requis pour que
+        // shadcn/shadcn-vue détectent une installation Tailwind valide (voir get-project-info.ts).
+        if (!vc.includes('@tailwindcss/vite')) {
+            importsToAdd.push("import tailwindcss from '@tailwindcss/vite';");
+            vc = vc.replace(/plugins: \\[(vue\\(\\)|react\\(\\))\\]/, 'plugins: [$1, tailwindcss()]');
+        }
+        if (importsToAdd.length) {
+            vc = importsToAdd.join('\\n') + '\\n' + vc;
+        }
+        fs.writeFileSync(viteFile, vc);
+    }
+
+    // Injection de la directive Tailwind CSS v4 dans le fichier CSS d'entrée.
+    // shadcn/shadcn-vue exigent un fichier CSS contenant @import "tailwindcss";
+    // pour détecter une configuration Tailwind valide, sinon : "No Tailwind CSS configuration found".
+    const cssFile = ['src/index.css', 'src/style.css'].find((f) => fs.existsSync(f));
+    if (cssFile) {
+        let css = fs.readFileSync(cssFile, 'utf8');
+        if (!css.includes('@import "tailwindcss"')) {
+            css = '@import "tailwindcss";\\n\\n' + css;
+            fs.writeFileSync(cssFile, css);
+        }
+    }
+
+    console.log('✅ Fichiers prêts.\\n');
+} catch (e) {
+    console.error('❌ Erreur Node:', e.message);
+    process.exit(1);
+}
+            `.trim();
+
+  // Encodage Base64 dynamique à la volée
+  const setupBase64 = Buffer.from(setupJs).toString('base64');
+
+  // Génération du fichier temporaire .cjs et exécution (avec passage du dossier et du template)
+  const prepareAndScaffold = (cible: string, template: string) => [
+    `[IO.File]::WriteAllBytes('expertees-setup.cjs', [Convert]::FromBase64String('${setupBase64}'))`,
+    `node expertees-setup.cjs "${cible}" "${template}"`,
+    `Remove-Item expertees-setup.cjs`,
+  ];
+
+  if (framework === 'react') {
+    descriptionStack = 'React 19 + Vite 7 + React Router v7 + Zustand + Tailwind CSS v4 + shadcn/ui';
+
+    const suiteCmds = [
+      `npm install`,
+      `npm install react-router-dom@7 zustand`,
+      `npm install -D tailwindcss @tailwindcss/vite @types/node`,
+      // -s (--silent) évite le prompt interactif "Use --force / --legacy-peer-deps"
+      // qui bloque le script en React 19 + npm (voir https://ui.shadcn.com/docs/react-19)
+      `npx shadcn@latest init -d -s`,
+    ];
+
+    if (enDansDossier) {
+      commandesInit = [
+        ...prepareAndScaffold('.', 'react-ts'),
+        ...suiteCmds,
+      ];
+    } else {
+      commandesInit = [
+        ...prepareAndScaffold(nomProjet, 'react-ts'),
+        `Set-Location "${nomProjet}"`,
+        ...suiteCmds,
+        `code .`,
+      ];
+    }
+  } else if (framework === 'angular') {
+    // Angular garde l'approche classique car @angular/cli a un flag --defaults parfait
+    descriptionStack = 'Angular 19 + Angular Router + NgRx Signals + Tailwind CSS v4';
+    if (enDansDossier) {
+      commandesInit = [
+        `npx @angular/cli@latest new "${nomProjet}" --routing --style=css --skip-git --directory . --defaults`,
+        `npm install -D tailwindcss @tailwindcss/postcss`,
+      ];
+    } else {
+      commandesInit = [
+        `npx @angular/cli@latest new "${nomProjet}" --routing --style=css --skip-git --defaults`,
+        `Set-Location "${nomProjet}"; npm install -D tailwindcss @tailwindcss/postcss`,
+        `code .`,
+      ];
+    }
+  } else {
+    descriptionStack = 'Vue 3.5 + Vite 7 + Pinia + vue-router 5 + Tailwind CSS v4 + shadcn-vue (Vega)';
+
+    const suiteCmds = [
+      `npm install`,
+      `npm install pinia vue-router@5`,
+      `npm install -D tailwindcss @tailwindcss/vite @types/node`,
+      `npx shadcn-vue@latest init -d --style vega`,
+    ];
+
+    if (enDansDossier) {
+      commandesInit = [
+        ...prepareAndScaffold('.', 'vue-ts'),
+        ...suiteCmds,
+      ];
+    } else {
+      commandesInit = [
+        ...prepareAndScaffold(nomProjet, 'vue-ts'),
+        `Set-Location "${nomProjet}"`,
+        ...suiteCmds,
+        `code .`,
+      ];
+    }
+  }
+
+  return { commandesInit, descriptionStack };
+}
+
+/** Affiche le résumé et lance le scaffold complet (commandes + bilan) pour un framework/nom donnés. */
+function lancerScaffold(
+  stream: vscode.ChatResponseStream,
+  threadId: string,
+  framework: string,
+  nomProjet: string,
+): void {
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  const enDansDossier = !!(workspaceFolders && workspaceFolders.length > 0);
+  const { commandesInit, descriptionStack } = construireCommandesScaffold(
+    framework,
+    nomProjet,
+    enDansDossier,
+  );
+
+  stream.markdown(
+    `🏗️ **Création du projet \`${nomProjet}\` — ${descriptionStack}**\n\n`,
+  );
+  if (enDansDossier) {
+    stream.markdown(
+      '> 📂 Installation dans le dossier de workspace actuel.\n\n',
+    );
+    stream.markdown(
+      '> ⚠️ **Attention** : si ce dossier n\'est pas vide, les fichiers existants (hors `.git`) seront **supprimés** pour permettre le scaffolding Vite.\n\n',
+    );
+  }
+  stream.markdown(
+    '> ⚙️ Configuration automatisée en cours (fichiers, alias et UI)...\n\n',
+  );
+
+  executerScriptSecuriseAvecBilan(
+    commandesInit,
+    `Initialisation du projet "${nomProjet}" (${descriptionStack})`,
+  );
+  reinitialiserSession(threadId);
+}
+
+// ---------------------------------------------------------------------------
 // GESTIONNAIRE DE RÉPONSE DE L'AGENT
 // ---------------------------------------------------------------------------
 
 async function gererRequete(
   requete: vscode.ChatRequest,
   contexte: vscode.ChatContext,
-  stream: vscode.ChatResponseStream,
-  _jeton: vscode.CancellationToken,
+  streamReel: vscode.ChatResponseStream,
+  jeton: vscode.CancellationToken,
 ): Promise<vscode.ChatResult> {
+  const traductionActive = langueVsCodeEstAnglaise();
+  const stream: vscode.ChatResponseStream = traductionActive
+    ? creerStreamBufferise(streamReel)
+    : streamReel;
+
   let threadId: string;
   if (contexte.history.length > 0) {
     const newId = String(contexte.history[0]);
@@ -455,6 +892,23 @@ async function gererRequete(
         messageNormalise === "reset"
       ) {
         afficherMenuPrincipal(stream);
+        break;
+      }
+
+      // ⚡ Raccourci : "init <vue|react|angular> <nom-du-projet>" scaffold directement,
+      // sans passer par les étapes intermédiaires de choix du framework puis du nom.
+      const raccourciInit = messageUtilisateur.match(
+        /^init\s+(vue|react|angular)\s+(.+)$/i,
+      );
+      if (raccourciInit) {
+        const frameworkRaccourci = raccourciInit[1].toLowerCase();
+        const nomProjetRaccourci = raccourciInit[2].trim();
+        session.frameworkChoisi = frameworkRaccourci;
+        session.nomProjet = nomProjetRaccourci;
+        stream.markdown(
+          `⚡ **Raccourci détecté** — initialisation directe de \`${nomProjetRaccourci}\` (${frameworkRaccourci}), sans passer par les étapes intermédiaires.\n\n`,
+        );
+        lancerScaffold(stream, threadId, frameworkRaccourci, nomProjetRaccourci);
         break;
       }
 
@@ -553,6 +1007,25 @@ async function gererRequete(
         break;
       }
 
+      if (messageNormalise === "6" || messageNormalise === "maj" || messageNormalise === "update") {
+        stream.markdown("## ⬇️ **Mise à jour d'ExperDeploy**\n\n");
+        stream.markdown(
+          "> Téléchargement de la dernière release GitHub et réinstallation de l'extension dans le terminal...\n\n",
+        );
+        executerScriptSecurise([
+          '$domain = "github.com"',
+          '$path = "Atom-CG/ExperteesDeployAgent/releases/latest/download/experdeploy.vsix"',
+          'Invoke-WebRequest -Uri "https://$domain/$path" -OutFile "$env:TEMP\experdeploy.vsix"',
+          'code --install-extension "$env:TEMP\experdeploy.vsix"',
+          'Remove-Item "$env:TEMP\experdeploy.vsix"',
+        ]);
+        stream.markdown(
+          "> ⚠️ Une fois l'installation terminée dans le terminal, **rechargez la fenêtre VS Code** (`Developer: Reload Window`) pour activer la nouvelle version.\n\n",
+        );
+        reinitialiserSession(threadId);
+        break;
+      }
+
       stream.markdown("❓ Choix non reconnu.\n\n");
       afficherMenuPrincipal(stream);
       break;
@@ -616,182 +1089,8 @@ async function gererRequete(
         case 'INIT_NOM_PROJET': {
             if (!messageUtilisateur) break;
             session.nomProjet = messageUtilisateur.trim();
-
-            const workspaceFolders = vscode.workspace.workspaceFolders;
-            const enDansDossier = workspaceFolders && workspaceFolders.length > 0;
             const framework = session.frameworkChoisi || 'vue';
-
-            let commandesInit: string[];
-            let descriptionStack: string;
-
-            // 🧠 SCRIPT NODE.JS "MAGIQUE" POUR VITE
-            // Exécute create-vite sans TTY (bloque l'assistant) et applique les patchs
-            const setupJs = `
-const fs = require('fs');
-const { execSync } = require('child_process');
-const target = process.argv[2] || '.';
-const template = process.argv[3] || 'vue-ts';
-
-try {
-    console.log('\\n⚡ Initialisation de Vite (mode silencieux strict)...');
-    // Le secret est ici : stdio 'ignore' simule l'absence de clavier.
-    // Vite ne PEUT PAS poser de questions et ne lancera pas npm run dev.
-    // --overwrite : évite que create-vite annule silencieusement ("Operation cancelled")
-    // quand le dossier cible n'est pas totalement vide (ex: .git, .vscode déjà présents).
-    // --no-interactive : force le mode non-interactif explicitement (ceinture + bretelles avec stdio ignore).
-    execSync('npm create vite@latest "' + target + '" --yes -- --template ' + template + ' --overwrite --no-interactive', { 
-        stdio: ['ignore', 'inherit', 'inherit'] 
-    });
-
-    // Déplacement dans le dossier créé (si applicable) pour modifier les fichiers
-    if (target !== '.') {
-        process.chdir(target);
-    }
-
-    console.log('🔧 Application des patchs Expertime...');
-    // shadcn/shadcn-vue lisent les alias de chemin dans le tsconfig.json RACINE (pas seulement
-    // tsconfig.app.json) : sans "baseUrl"/"paths" à la racine, l'init échoue avec "Could not load
-    // the workspace config ... configure its path aliases". Il faut donc patcher les DEUX fichiers.
-    function patchTsconfig(file) {
-        if (!fs.existsSync(file)) { return; }
-        let ts = fs.readFileSync(file, 'utf8');
-        if (ts.includes('"baseUrl"')) { return; }
-        if (ts.includes('"compilerOptions": {')) {
-            ts = ts.replace('"compilerOptions": {', '"compilerOptions": {\\n    "baseUrl": ".",\\n    "paths": { "@/*": ["./src/*"] },');
-        } else {
-            // tsconfig.json racine de type "solution" (juste files/references, pas de compilerOptions)
-            const idx = ts.indexOf('{');
-            ts = ts.slice(0, idx + 1) + '\\n  "compilerOptions": {\\n    "baseUrl": ".",\\n    "paths": { "@/*": ["./src/*"] }\\n  },' + ts.slice(idx + 1);
-        }
-        fs.writeFileSync(file, ts);
-    }
-    patchTsconfig('tsconfig.json');
-    patchTsconfig('tsconfig.app.json');
-
-    const viteFile = 'vite.config.ts';
-    if (fs.existsSync(viteFile)) {
-        let vc = fs.readFileSync(viteFile, 'utf8');
-        const importsToAdd = [];
-        if (!vc.includes('alias')) {
-            importsToAdd.push("import path from 'path';");
-            vc = vc.replace('plugins: [vue()]', "plugins: [vue()],\\n  resolve: { alias: { '@': path.resolve(__dirname, './src') } }");
-            vc = vc.replace('plugins: [react()]', "plugins: [react()],\\n  resolve: { alias: { '@': path.resolve(__dirname, './src') } }");
-        }
-        // Enregistrement du plugin Tailwind CSS v4 (@tailwindcss/vite) — requis pour que
-        // shadcn/shadcn-vue détectent une installation Tailwind valide (voir get-project-info.ts).
-        if (!vc.includes('@tailwindcss/vite')) {
-            importsToAdd.push("import tailwindcss from '@tailwindcss/vite';");
-            vc = vc.replace(/plugins: \\[(vue\\(\\)|react\\(\\))\\]/, 'plugins: [$1, tailwindcss()]');
-        }
-        if (importsToAdd.length) {
-            vc = importsToAdd.join('\\n') + '\\n' + vc;
-        }
-        fs.writeFileSync(viteFile, vc);
-    }
-
-    // Injection de la directive Tailwind CSS v4 dans le fichier CSS d'entrée.
-    // shadcn/shadcn-vue exigent un fichier CSS contenant @import "tailwindcss";
-    // pour détecter une configuration Tailwind valide, sinon : "No Tailwind CSS configuration found".
-    const cssFile = ['src/index.css', 'src/style.css'].find((f) => fs.existsSync(f));
-    if (cssFile) {
-        let css = fs.readFileSync(cssFile, 'utf8');
-        if (!css.includes('@import "tailwindcss"')) {
-            css = '@import "tailwindcss";\\n\\n' + css;
-            fs.writeFileSync(cssFile, css);
-        }
-    }
-
-    console.log('✅ Fichiers prêts.\\n');
-} catch (e) {
-    console.error('❌ Erreur Node:', e.message);
-    process.exit(1);
-}
-            `.trim();
-            
-            // Encodage Base64 dynamique à la volée
-            const setupBase64 = Buffer.from(setupJs).toString('base64');
-
-            // Génération du fichier temporaire .cjs et exécution (avec passage du dossier et du template)
-            const prepareAndScaffold = (cible: string, template: string) => [
-                `[IO.File]::WriteAllBytes('expertees-setup.cjs', [Convert]::FromBase64String('${setupBase64}'))`,
-                `node expertees-setup.cjs "${cible}" "${template}"`,
-                `Remove-Item expertees-setup.cjs`
-            ];
-
-            if (framework === 'react') {
-                descriptionStack = 'React 19 + Vite 7 + React Router v7 + Zustand + Tailwind CSS v4 + shadcn/ui';
-                
-                const suiteCmds = [
-                    `npm install`,
-                    `npm install react-router-dom@7 zustand`,
-                    `npm install -D tailwindcss @tailwindcss/vite @types/node`,
-                    // -s (--silent) évite le prompt interactif "Use --force / --legacy-peer-deps"
-                    // qui bloque le script en React 19 + npm (voir https://ui.shadcn.com/docs/react-19)
-                    `npx shadcn@latest init -d -s`
-                ];
-
-                if (enDansDossier) {
-                    commandesInit = [
-                        ...prepareAndScaffold('.', 'react-ts'),
-                        ...suiteCmds
-                    ];
-                } else {
-                    commandesInit = [
-                        ...prepareAndScaffold(session.nomProjet, 'react-ts'),
-                        `Set-Location "${session.nomProjet}"`,
-                        ...suiteCmds,
-                        `code .`
-                    ];
-                }
-            } else if (framework === 'angular') {
-                // Angular garde l'approche classique car @angular/cli a un flag --defaults parfait
-                descriptionStack = 'Angular 19 + Angular Router + NgRx Signals + Tailwind CSS v4';
-                if (enDansDossier) {
-                    commandesInit = [
-                        `npx @angular/cli@latest new "${session.nomProjet}" --routing --style=css --skip-git --directory . --defaults`,
-                        `npm install -D tailwindcss @tailwindcss/postcss`
-                    ];
-                } else {
-                    commandesInit = [
-                        `npx @angular/cli@latest new "${session.nomProjet}" --routing --style=css --skip-git --defaults`,
-                        `Set-Location "${session.nomProjet}"; npm install -D tailwindcss @tailwindcss/postcss`,
-                        `code .`
-                    ];
-                }
-            } else {
-                descriptionStack = 'Vue 3.5 + Vite 7 + Pinia + vue-router 5 + Tailwind CSS v4 + shadcn-vue (Vega)';
-                
-                const suiteCmds = [
-                    `npm install`,
-                    `npm install pinia vue-router@5`,
-                    `npm install -D tailwindcss @tailwindcss/vite @types/node`,
-                    `npx shadcn-vue@latest init -d --style vega`
-                ];
-
-                if (enDansDossier) {
-                    commandesInit = [
-                        ...prepareAndScaffold('.', 'vue-ts'),
-                        ...suiteCmds
-                    ];
-                } else {
-                    commandesInit = [
-                        ...prepareAndScaffold(session.nomProjet, 'vue-ts'),
-                        `Set-Location "${session.nomProjet}"`,
-                        ...suiteCmds,
-                        `code .`
-                    ];
-                }
-            }
-
-            stream.markdown(`🏗️ **Création du projet \`${session.nomProjet}\` — ${descriptionStack}**\n\n`);
-            if (enDansDossier) {
-                stream.markdown('> 📂 Installation dans le dossier de workspace actuel.\n\n');
-                stream.markdown('> ⚠️ **Attention** : si ce dossier n\'est pas vide, les fichiers existants (hors `.git`) seront **supprimés** pour permettre le scaffolding Vite.\n\n');
-            }
-            stream.markdown('> ⚙️ Configuration automatisée en cours (fichiers, alias et UI)...\n\n');
-
-            executerScriptSecurise(commandesInit);
-            reinitialiserSession(threadId);
+            lancerScaffold(stream, threadId, framework, session.nomProjet);
             break;
         }
 
@@ -892,64 +1191,7 @@ try {
         messageNormalise === "o" ||
         messageNormalise === "yes"
       ) {
-        stream.markdown("⬆️ **Compilation et push en cours...**\n\n");
-        stream.markdown(
-          "> 1. `npm run build` — génération du dossier `dist`\n",
-        );
-        stream.markdown(
-          "> 2. `npx power-apps push` — envoi vers Dataverse\n\n",
-        );
-
-        // Script bloc unique : build + push avec gestion d'erreur intégrée.
-        // En cas d'ApplicationNotFound, l'appId obsolète est supprimé de
-        // power.config.json et le push est relancé automatiquement.
-        const scriptPush = [
-          `& {`,
-          `Write-Host "🔨 Compilation du projet..." -ForegroundColor Cyan;`,
-          `npm run build;`,
-          `if ($LASTEXITCODE -ne 0) {`,
-          `  Write-Host "❌ Compilation échouée. Corrigez les erreurs TypeScript/Vite avant de réessayer." -ForegroundColor Red;`,
-          `  return`,
-          `};`,
-          `Write-Host "⬆️ Push vers Dataverse..." -ForegroundColor Cyan;`,
-          `$pushOut = npx power-apps push 2>&1;`,
-          `$pushOut | ForEach-Object { Write-Host $_ };`,
-          `if ($LASTEXITCODE -ne 0) {`,
-          `  $outStr = $pushOut | Out-String;`,
-          `  Write-Host "";`,
-          `  if ($outStr -match 'ApplicationNotFound|could not be found') {`,
-          `    Write-Host "⚠️ Application introuvable — appId obsolète détecté." -ForegroundColor Yellow;`,
-          `    $configPath = Join-Path (Get-Location) 'power.config.json';`,
-          `    if (Test-Path $configPath) {`,
-          `      Write-Host "🔧 Suppression de l'appId dans power.config.json..." -ForegroundColor Cyan;`,
-          `      $cfg = Get-Content $configPath -Raw | ConvertFrom-Json;`,
-          `      $cfg.PSObject.Properties.Remove('appId');`,
-          `      $cfg | ConvertTo-Json -Depth 10 | Set-Content $configPath -Encoding UTF8;`,
-          `      Write-Host "✅ appId supprimé. Nouvelle tentative de push..." -ForegroundColor Green;`,
-          `      npx power-apps push;`,
-          `      if ($LASTEXITCODE -ne 0) {`,
-          `        Write-Host "❌ Push échoué après réinitialisation de l'appId." -ForegroundColor Red;`,
-          `        Write-Host "👉 Vérifiez que vous êtes connecté au bon environnement (Code App > Initialiser)." -ForegroundColor Cyan`,
-          `      } else {`,
-          `        Write-Host "✅ Push terminé avec succès !" -ForegroundColor Green`,
-          `      }`,
-          `    } else {`,
-          `      Write-Host "❌ power.config.json introuvable dans le dossier courant." -ForegroundColor Red`,
-          `    }`,
-          `  } elseif ($outStr -match 'Unauthorized|401|auth') {`,
-          `    Write-Host "❌ Erreur d'authentification." -ForegroundColor Red;`,
-          `    Write-Host "👉 Relancez 'pac auth create --environment <ID>' dans le terminal puis retentez le push." -ForegroundColor Cyan`,
-          `  } else {`,
-          `    Write-Host "❌ Push échoué. Consultez l'erreur ci-dessus." -ForegroundColor Red`,
-          `  }`,
-          `} else {`,
-          `  Write-Host "✅ Push terminé avec succès !" -ForegroundColor Green`,
-          `}`,
-          `}`,
-        ].join(" ");
-
-        executerDansTerminal(scriptPush);
-        reinitialiserSession(threadId);
+        lancerPushCodeApp(stream, threadId);
         break;
       }
 
@@ -1014,11 +1256,7 @@ try {
 
       if (messageNormalise === "2" || messageNormalise === "initialiser") {
         session.etat = "CODE_APP_INIT_ENV";
-        stream.markdown("## 🚀 Initialisation en Power Apps Code App\n\n");
-        stream.markdown(
-          "Quel est l'**ID de votre environnement Power Platform** ?\n\n",
-        );
-        stream.markdown("> _Ex : `12345678-abcd-1234-abcd-1234567890ab`_\n");
+        afficherPromptEnvironnementCodeApp(stream);
         break;
       }
 
@@ -1071,11 +1309,7 @@ try {
         messageNormalise === "yes"
       ) {
         session.etat = "CODE_APP_INIT_ENV";
-        stream.markdown("## 🚀 Initialisation en Power Apps Code App\n\n");
-        stream.markdown(
-          "Quel est l'**ID de votre environnement Power Platform** ?\n\n",
-        );
-        stream.markdown("> _Ex : `12345678-abcd-1234-abcd-1234567890ab`_\n");
+        afficherPromptEnvironnementCodeApp(stream);
         break;
       }
 
@@ -1212,9 +1446,17 @@ try {
     }
 
     case "CODE_APP_INIT_ENV": {
-      if (!messageUtilisateur) break;
-
-      const envId = messageUtilisateur.trim();
+      let envId = messageUtilisateur.trim();
+      if (!envId) {
+        const envSauvegarde = lireEnvironnementSauvegarde();
+        if (!envSauvegarde) {
+          break;
+        }
+        envId = envSauvegarde;
+        stream.markdown(
+          `> ♻️ Réutilisation de l'environnement précédent : \`${envId}\`\n\n`,
+        );
+      }
       stream.markdown(`## ⚙️ Configuration du projet en Code App\n\n`);
       stream.markdown(`🌍 ID d'environnement : **${envId}**\n\n`);
       stream.markdown("### Étapes lancées dans le terminal :\n");
@@ -1243,6 +1485,16 @@ try {
     }
   }
 
+  if (traductionActive) {
+    const texteFrancais = (stream as StreamBufferise).obtenirTexteAccumule();
+    const texteTraduit = await traduireMarkdownEnAnglais(
+      texteFrancais,
+      requete.model,
+      jeton,
+    );
+    streamReel.markdown(texteTraduit);
+  }
+
   return {};
 }
 
@@ -1264,7 +1516,10 @@ function afficherMenuPrincipal(stream: vscode.ChatResponseStream): void {
   stream.markdown("| **3** | `run` | Démarrer proxy & serveur local |\n");
   stream.markdown("| **4** | `push` | Pousser le Code App (Inner-loop) |\n");
   stream.markdown(
-    "| **5** | `connexion` | Gérer la connexion et sélectionner l'environnement Power Platform |\n\n",
+    "| **5** | `connexion` | Gérer la connexion et sélectionner l'environnement Power Platform |\n",
+  );
+  stream.markdown(
+    "| **6** | `maj` | Mettre à jour l'extension ExperDeploy vers la dernière version |\n\n",
   );
 }
 

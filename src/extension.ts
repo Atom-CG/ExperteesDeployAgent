@@ -309,6 +309,35 @@ function lireEnvironnementSauvegarde(): string | undefined {
   return undefined;
 }
 
+// Relit l'ID d'environnement écrit par `power-apps init` dans power.config.json
+// (champ `environmentId`, distinct de `selectedEnvironment` géré par le menu "connexion").
+// Permet de rafraîchir la connexion PAC avant `run`/`push` SANS redemander l'ID à l'utilisateur.
+function lireEnvironmentIdCodeApp(): string | undefined {
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  if (!workspaceFolders || workspaceFolders.length === 0) {
+    return undefined;
+  }
+
+  const configPath = path.join(
+    workspaceFolders[0].uri.fsPath,
+    "power.config.json",
+  );
+  if (!fs.existsSync(configPath)) {
+    return undefined;
+  }
+
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    const id = config.environmentId ?? config.environment_id;
+    if (typeof id === "string" && id.length > 0) {
+      return id;
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // UTILITAIRES TERMINAL
 // ---------------------------------------------------------------------------
@@ -336,8 +365,22 @@ function executerScriptSecurise(commandes: string[]): void {
   const terminal = obtenirOuCreerTerminal();
   terminal.show(true);
 
+  // $LASTEXITCODE n'est modifié QUE par les commandes natives (npm, npx, node...).
+  // Les cmdlets/appels .NET (ex: [IO.File]::WriteAllBytes, Remove-Item, Set-Location) le
+  // laissent inchangé : sur un terminal fraîchement créé il vaut $null, donc
+  // `$LASTEXITCODE -ne 0` serait vrai à tort (`$null -ne 0` => `$true`) dès la 1ère étape.
+  // On l'initialise à 0 et on combine avec `$?` (reflète aussi l'échec des cmdlets).
+  //
+  // ⚠️ `break` seul ne stoppe PAS la chaîne : chaque commande est envoyée séparément
+  // via `terminal.sendText()` à un terminal interactif déjà lancé, pas exécutée dans une
+  // boucle/script unique. `break` hors de tout `for`/`while` n'a donc aucun effet sur les
+  // lignes suivantes déjà mises en file — elles s'exécutent quand même (bug observé : un
+  // message "✅ succès" s'affichait après un échec réel de `npx power-apps init`). On
+  // utilise donc le même garde-fou `$experdeployAbort` que `executerScriptSecuriseAvecBilan`.
+  terminal.sendText("$experdeployAbort = $false; $global:LASTEXITCODE = 0");
+
   for (const cmd of commandes) {
-    const commandeSecurisee = `${cmd}; if ($LASTEXITCODE -ne 0) { Write-Host '❌ Arrêt du script suite à une erreur.' -ForegroundColor Red; break }`;
+    const commandeSecurisee = `if (-not $experdeployAbort) { ${cmd}; if ((-not $?) -or ($LASTEXITCODE -ne 0)) { Write-Host '❌ Arrêt du script suite à une erreur.' -ForegroundColor Red; $experdeployAbort = $true } }`;
     terminal.sendText(commandeSecurisee);
   }
 }
@@ -352,11 +395,17 @@ function executerScriptSecuriseAvecBilan(
   const terminal = obtenirOuCreerTerminal();
   terminal.show(true);
 
-  terminal.sendText("$experdeployAbort = $false; $experdeployErreurs = @()");
+  // $LASTEXITCODE = 0 explicite : sans ça, sur un terminal neuf il vaut $null tant
+  // qu'aucune commande native n'a tourné. Or les cmdlets/.NET (WriteAllBytes, Remove-Item,
+  // Set-Location, ...) NE LE MODIFIENT JAMAIS. Résultat : `$LASTEXITCODE -ne 0` évalue
+  // `$null -ne 0` => $true et la toute 1ère étape (souvent un cmdlet) est déclarée en
+  // échec à tort, avec un "code de sortie: " vide dans le message. On combine donc le
+  // test avec `$?` qui reflète correctement le succès/échec des cmdlets également.
+  terminal.sendText("$experdeployAbort = $false; $experdeployErreurs = @(); $global:LASTEXITCODE = 0");
 
   commandes.forEach((cmd, index) => {
     const etape = index + 1;
-    const commandeSecurisee = `if (-not $experdeployAbort) { ${cmd}; if ($LASTEXITCODE -ne 0) { $msg = "❌ Étape ${etape}/${commandes.length} échouée (code de sortie: $LASTEXITCODE)"; Write-Host $msg -ForegroundColor Red; $experdeployErreurs += $msg; $experdeployAbort = $true } }`;
+    const commandeSecurisee = `if (-not $experdeployAbort) { ${cmd}; if ((-not $?) -or ($LASTEXITCODE -ne 0)) { $codeAffiche = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 'n/a' }; $msg = "❌ Étape ${etape}/${commandes.length} échouée (code de sortie: $codeAffiche)"; Write-Host $msg -ForegroundColor Red; $experdeployErreurs += $msg; $experdeployAbort = $true } }`;
     terminal.sendText(commandeSecurisee);
   });
 
@@ -476,81 +525,6 @@ async function installerPrerequisCodeApp(
 // TRADUCTION AUTOMATIQUE (si VS Code est configuré en anglais)
 // ---------------------------------------------------------------------------
 
-/** Détecte si VS Code est affiché en anglais (ex. "en", "en-us"). */
-function langueVsCodeEstAnglaise(): boolean {
-  return vscode.env.language.toLowerCase().startsWith("en");
-}
-
-/**
- * Enveloppe un ChatResponseStream réel : les appels à `.markdown()` sont
- * accumulés en mémoire au lieu d'être écrits immédiatement. Permet de
- * traduire l'intégralité de la réponse en un seul appel LLM avant affichage.
- */
-interface StreamBufferise extends vscode.ChatResponseStream {
-  obtenirTexteAccumule(): string;
-}
-
-function creerStreamBufferise(
-  streamReel: vscode.ChatResponseStream,
-): StreamBufferise {
-  // NB : on ne peut pas utiliser un Proxy ici — les méthodes de l'objet stream
-  // fourni par VS Code sont des propriétés propres non-configurables, ce qui
-  // viole l'invariant du piège `get` d'un Proxy dès qu'on retourne une valeur
-  // différente pour `markdown`. On construit donc un objet simple qui délègue
-  // explicitement chaque méthode inutilisée au stream réel.
-  const morceaux: string[] = [];
-  return {
-    markdown: (valeur: string | vscode.MarkdownString) => {
-      morceaux.push(typeof valeur === "string" ? valeur : valeur.value);
-    },
-    anchor: (...args: Parameters<vscode.ChatResponseStream["anchor"]>) =>
-      streamReel.anchor(...args),
-    button: (...args: Parameters<vscode.ChatResponseStream["button"]>) =>
-      streamReel.button(...args),
-    filetree: (...args: Parameters<vscode.ChatResponseStream["filetree"]>) =>
-      streamReel.filetree(...args),
-    progress: (...args: Parameters<vscode.ChatResponseStream["progress"]>) =>
-      streamReel.progress(...args),
-    reference: (
-      ...args: Parameters<vscode.ChatResponseStream["reference"]>
-    ) => streamReel.reference(...args),
-    push: (...args: Parameters<vscode.ChatResponseStream["push"]>) =>
-      streamReel.push(...args),
-    obtenirTexteAccumule: () => morceaux.join(""),
-  };
-}
-
-/** Traduit un bloc de Markdown français en anglais via le modèle de langage de la requête. */
-async function traduireMarkdownEnAnglais(
-  texte: string,
-  modele: vscode.LanguageModelChat,
-  jeton: vscode.CancellationToken,
-): Promise<string> {
-  if (!texte.trim()) {
-    return texte;
-  }
-  try {
-    const messages = [
-      vscode.LanguageModelChatMessage.User(
-        "Translate the following Markdown content from French to English. " +
-          "Preserve ALL Markdown formatting exactly (tables, headings, bold, links, code blocks, emojis, line breaks). " +
-          "Only translate the natural-language French text, never touch code, commands, file paths or placeholders. " +
-          "Return ONLY the translated Markdown, with no extra commentary.\n\n---\n\n" +
-          texte,
-      ),
-    ];
-    const reponse = await modele.sendRequest(messages, {}, jeton);
-    let resultat = "";
-    for await (const fragment of reponse.text) {
-      resultat += fragment;
-    }
-    return resultat.trim() ? resultat : texte;
-  } catch {
-    // En cas d'échec (modèle indisponible, requête annulée...), on retombe sur le texte français original.
-    return texte;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // POWER APPS CODE APP — PROMPT ENVIRONNEMENT (avec réutilisation)
 // ---------------------------------------------------------------------------
@@ -578,10 +552,10 @@ function afficherPromptEnvironnementCodeApp(
 // ---------------------------------------------------------------------------
 
 /** Compile puis pousse le Code App vers Dataverse, avec gestion des erreurs courantes. */
-function lancerPushCodeApp(
+async function lancerPushCodeApp(
   stream: vscode.ChatResponseStream,
   threadId: string,
-): void {
+): Promise<void> {
   stream.markdown("⬆️ **Compilation et push en cours...**\n\n");
   stream.markdown(
     "> 1. `npm run build` — génération du dossier `dist`\n",
@@ -628,7 +602,7 @@ function lancerPushCodeApp(
     `    }`,
     `  } elseif ($outStr -match 'Unauthorized|401|auth') {`,
     `    Write-Host "❌ Erreur d'authentification." -ForegroundColor Red;`,
-    `    Write-Host "👉 Relancez 'pac auth create --environment <ID>' dans le terminal puis retentez le push." -ForegroundColor Cyan`,
+    `    Write-Host "👉 Relancez 'pac auth create --environment <ID> --deviceCode' dans le terminal puis retentez le push." -ForegroundColor Cyan`,
     `  } else {`,
     `    Write-Host "❌ Push échoué. Consultez l'erreur ci-dessus." -ForegroundColor Red`,
     `  }`,
@@ -638,7 +612,14 @@ function lancerPushCodeApp(
     `}`,
   ].join(" ");
 
-  executerDansTerminal(scriptPush);
+  // NOTE (2026-07-10) : l'auto-reconnexion PAC basée sur l'API Shell Integration
+  // (`executerAvecAutoReauth`) a été retirée — elle pouvait rester bloquée indéfiniment
+  // (aucun événement de fin de commande reçu, même pour un simple `Write-Host`, confirmé
+  // en usage réel) alors que la même commande fonctionne normalement dans un terminal
+  // classique. `executerScriptSecurise` (sendText, comme une saisie manuelle) est fiable ;
+  // en cas de session expirée, le script affiche déjà un message invitant à relancer
+  // `pac auth create --environment <ID> --deviceCode` manuellement.
+  executerScriptSecurise([scriptPush]);
   reinitialiserSession(threadId);
 }
 
@@ -743,10 +724,19 @@ try {
   const setupBase64 = Buffer.from(setupJs).toString('base64');
 
   // Génération du fichier temporaire .cjs et exécution (avec passage du dossier et du template)
+  //
+  // ⚠️ Le script temporaire est écrit dans le dossier TEMP système ($env:TEMP), PAS dans le
+  // dossier cible. Quand `cible` vaut "." (scaffold dans le dossier courant), `create-vite
+  // --overwrite` (appelé DANS ce script) vide entièrement le dossier cible (hors .git) —
+  // si le .cjs était écrit là, il serait supprimé pendant sa propre exécution, et l'étape
+  // de nettoyage (Remove-Item) échouerait ensuite avec "Cannot find path" (le fichier
+  // n'existant déjà plus). En le plaçant hors du dossier scaffoldé, il survit à
+  // --overwrite et le nettoyage final réussit toujours.
   const prepareAndScaffold = (cible: string, template: string) => [
-    `[IO.File]::WriteAllBytes('expertees-setup.cjs', [Convert]::FromBase64String('${setupBase64}'))`,
-    `node expertees-setup.cjs "${cible}" "${template}"`,
-    `Remove-Item expertees-setup.cjs`,
+    `$experdeploySetupPath = Join-Path $env:TEMP "expertees-setup-$([guid]::NewGuid().ToString('N')).cjs"`,
+    `[IO.File]::WriteAllBytes($experdeploySetupPath, [Convert]::FromBase64String('${setupBase64}'))`,
+    `node $experdeploySetupPath "${cible}" "${template}"`,
+    `Remove-Item $experdeploySetupPath -ErrorAction SilentlyContinue`,
   ];
 
   if (framework === 'react') {
@@ -861,13 +851,9 @@ function lancerScaffold(
 async function gererRequete(
   requete: vscode.ChatRequest,
   contexte: vscode.ChatContext,
-  streamReel: vscode.ChatResponseStream,
-  jeton: vscode.CancellationToken,
+  stream: vscode.ChatResponseStream,
+  _jeton: vscode.CancellationToken,
 ): Promise<vscode.ChatResult> {
-  const traductionActive = langueVsCodeEstAnglaise();
-  const stream: vscode.ChatResponseStream = traductionActive
-    ? creerStreamBufferise(streamReel)
-    : streamReel;
 
   let threadId: string;
   if (contexte.history.length > 0) {
@@ -948,17 +934,42 @@ async function gererRequete(
       if (messageNormalise === "3" || messageNormalise === "run") {
         const { port: portDev, framework } = detecterPortDevServeur();
         const localAppUrlMisAJour = mettreAJourLocalAppUrl(portDev);
+        const environmentId = lireEnvironmentIdCodeApp();
 
         stream.markdown(
-          "▶️ **Lancement du proxy Power Apps et du serveur local...**\n\n",
+          "▶️ **Lancement du serveur de développement Code App...**\n\n",
         );
         if (localAppUrlMisAJour) {
           stream.markdown(
             `> 🔧 Framework détecté : **${framework}** — \`localAppUrl\` mis à jour → \`http://localhost:${portDev}\` dans \`power.config.json\`\n\n`,
           );
         }
-        executerDansTerminal("npm run dev & npx power-apps run");
-        stream.markdown("> ⏳ Les deux serveurs démarrent en parallèle.\n\n");
+
+        // ⚠️ `npm run dev & npx power-apps run` était FAUX à deux titres :
+        // 1. `&` n'est pas un séparateur de commandes en PowerShell (contrairement à bash) —
+        //    la syntaxe ne lance pas réellement les deux commandes en parallèle de façon fiable.
+        // 2. Le script `dev` du template Power Apps Code App (créé par `power-apps init`)
+        //    lance DÉJÀ le proxy Power Apps ET le serveur Vite ensemble — `npx power-apps run`
+        //    en plus est redondant et peut relancer un flow d'auth CLI séparé, expliquant le
+        //    "redemande l'ID d'environnement" au moment du run.
+        // FIX : on rafraîchit d'abord la connexion PAC (silencieusement, avec l'`environmentId`
+        // déjà connu via `power.config.json`, sans jamais redemander à l'utilisateur), puis on
+        // lance uniquement `npm run dev` (recommandation officielle Microsoft Learn).
+        if (environmentId) {
+          stream.markdown(
+            `> 🔐 Connexion Power Platform maintenue sur l'environnement \`${environmentId}\`.\n\n`,
+          );
+          executerScriptSecurise([
+            `pac auth create --environment "${environmentId}" --deviceCode`,
+            `npm run dev`,
+          ]);
+        } else {
+          stream.markdown(
+            "> ⚠️ Aucun `environmentId` détecté dans `power.config.json` — initialisez d'abord le projet (`codeapp` puis `initialiser`) si ce n'est pas déjà fait.\n\n",
+          );
+          executerDansTerminal("npm run dev");
+        }
+
         stream.markdown(
           `> ℹ️ L'avertissement _"NOT currently running"_ est **normal** — le serveur (port ${portDev}) prend quelques secondes à démarrer.\n\n`,
         );
@@ -1141,7 +1152,7 @@ async function gererRequete(
 
       // Ajout de la commande "code" à la fin du script pour ouvrir le fichier !
       const commandesExport = [
-        `pac auth create --environment ${session.idSource}`,
+        `pac auth create --environment ${session.idSource} --deviceCode`,
         `pac solution export --name ${session.nomSolution} --path ./exports --managed false`,
         `pac solution export --name ${session.nomSolution} --path ./exports --managed true`,
         `pac solution create-settings --solution-zip ./exports/${session.nomSolution}_managed.zip --settings-file ./deploymentsettings.json`,
@@ -1174,7 +1185,7 @@ async function gererRequete(
 
       // Utilisation de --environment au lieu de --url
       const commandesImport = [
-        `pac auth create --environment ${session.idCible}`,
+        `pac auth create --environment ${session.idCible} --deviceCode`,
         `pac auth select --index 1`,
         `pac solution import --path ./exports/${session.nomSolution}_managed.zip --settings-file ./deploymentsettings.json`,
       ];
@@ -1191,7 +1202,7 @@ async function gererRequete(
         messageNormalise === "o" ||
         messageNormalise === "yes"
       ) {
-        lancerPushCodeApp(stream, threadId);
+        await lancerPushCodeApp(stream, threadId);
         break;
       }
 
@@ -1342,9 +1353,9 @@ async function gererRequete(
         session.etat = "CONNEXION_AJOUT_COMPTE";
         stream.markdown("## ➕ **Ajout d'un nouveau compte**\n\n");
         stream.markdown(
-          "> Un navigateur va s'ouvrir pour vous authentifier sur Power Platform.\n\n",
+          "> Un code et une URL vont s'afficher dans le terminal — ouvrez l'URL dans un navigateur et saisissez le code pour vous authentifier sur Power Platform.\n\n",
         );
-        executerDansTerminal("pac auth create");
+        executerDansTerminal("pac auth create --deviceCode");
         stream.markdown("---\n\n");
         stream.markdown(
           "Une fois l'authentification terminée dans le navigateur, tapez **suite** pour voir la liste des environnements disponibles.\n",
@@ -1466,33 +1477,45 @@ async function gererRequete(
       stream.markdown("2. 📦 Installation du SDK **@microsoft/power-apps**\n");
       stream.markdown("3. 🔧 Initialisation du projet Code App\n\n");
       stream.markdown(
-        "> ✅ Suivez les instructions dans le terminal. Une fois terminé, utilisez **3** (`run`) pour démarrer le proxy.\n\n",
+        "> ✅ Suivez les instructions dans le terminal. Une fois terminé, utilisez **3** (`run`) pour démarrer le serveur local.\n\n",
       );
+
+      // NOTE (2026-07-10) : `npx power-apps init` gère sa PROPRE session
+      // d'authentification, distincte de celle de `pac` — un `pac auth create
+      // --deviceCode` réussi juste avant ne suffit donc pas toujours à éviter un
+      // AADSTS70043 (refresh token expiré) au moment où `power-apps init` tente sa
+      // propre auth silencieuse. Si ça échoue, on relance automatiquement une
+      // authentification INTERACTIVE (`pac auth create` SANS `--deviceCode`, donc avec
+      // ouverture automatique du popup navigateur) puis on retente `power-apps init`
+      // une seule fois, sans action manuelle de l'utilisateur.
+      const commandeInitAvecRetryAuth = [
+        `Write-Host "🔧 Initialisation du projet Code App..." -ForegroundColor Cyan`,
+        `$global:LASTEXITCODE = 0`,
+        `npx power-apps init`,
+        `if ($LASTEXITCODE -ne 0) { Write-Host "⚠️ Échec probable dû à une session expirée. Nouvelle authentification (popup navigateur)..." -ForegroundColor Yellow; pac auth create --environment "${envId}"; $global:LASTEXITCODE = 0; npx power-apps init }`,
+      ].join("; ");
 
       const commandesCodeApp = [
         `Write-Host "🔐 Authentification Power Platform..." -ForegroundColor Cyan`,
-        `pac auth create --environment "${envId}"`,
+        `pac auth create --environment "${envId}" --deviceCode`,
         `Write-Host "📦 Installation du SDK @microsoft/power-apps..." -ForegroundColor Cyan`,
         `npm install @microsoft/power-apps`,
-        `Write-Host "🔧 Initialisation du projet Code App..." -ForegroundColor Cyan`,
-        `npx power-apps init`,
+        commandeInitAvecRetryAuth,
         `Write-Host "✅ Projet initialisé avec succès !" -ForegroundColor Green`,
       ];
+      // NOTE (2026-07-10) : `executerAvecAutoReauth` (basé sur l'API Shell Integration)
+      // a été retiré — il restait bloqué indéfiniment dans certains environnements, y
+      // compris sur un simple `Write-Host` (aucune commande suivante n'était jamais
+      // envoyée), alors que la même commande fonctionne normalement dans un terminal
+      // classique. `executerScriptSecurise` (sendText, identique à une saisie manuelle)
+      // reste utilisé ici ; c'est le contenu de `commandeInitAvecRetryAuth` (script
+      // PowerShell auto-suffisant, sans dépendance à un événement VS Code) qui gère
+      // désormais la reconnexion automatique en cas d'échec de `power-apps init`.
       executerScriptSecurise(commandesCodeApp);
 
       reinitialiserSession(threadId);
       break;
     }
-  }
-
-  if (traductionActive) {
-    const texteFrancais = (stream as StreamBufferise).obtenirTexteAccumule();
-    const texteTraduit = await traduireMarkdownEnAnglais(
-      texteFrancais,
-      requete.model,
-      jeton,
-    );
-    streamReel.markdown(texteTraduit);
   }
 
   return {};
@@ -1513,7 +1536,7 @@ function afficherMenuPrincipal(stream: vscode.ChatResponseStream): void {
   stream.markdown(
     "| **2** | `codeapp` | Transformer le projet en Power Apps Code App |\n",
   );
-  stream.markdown("| **3** | `run` | Démarrer proxy & serveur local |\n");
+  stream.markdown("| **3** | `run` | Démarrer le serveur local (connexion maintenue) |\n");
   stream.markdown("| **4** | `push` | Pousser le Code App (Inner-loop) |\n");
   stream.markdown(
     "| **5** | `connexion` | Gérer la connexion et sélectionner l'environnement Power Platform |\n",

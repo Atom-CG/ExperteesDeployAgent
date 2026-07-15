@@ -1,36 +1,68 @@
-name: Publish Release
+name: Build & Release VSIX
 
+# Se déclenche uniquement sur un tag de version, ex: v1.0.5
 on:
   push:
     tags:
-      - 'v*' # Se déclenche à chaque tag v1.0.0, v0.0.2, etc.
+      - "v*.*.*"
+
+permissions:
+  contents: write
 
 jobs:
-  build_and_release:
+  build-and-release:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout du code
+      - name: Checkout du dépôt
         uses: actions/checkout@v4
 
       - name: Installation de Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: 'npm'
+          node-version: "22"
+          cache: "npm"
+
+      - name: Extraction de la version depuis le tag
+        id: version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Vérification cohérence tag / package.json
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${{ steps.version.outputs.version }}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Mismatch — tag v$TAG_VERSION mais package.json est en $PKG_VERSION. Alignez les deux avant de tagger."
+            exit 1
+          fi
 
       - name: Installation des dépendances
         run: npm ci
 
-      - name: Compilation du package VSIX
-        run: npx @vscode/vsce package
+      - name: Lint
+        run: npm run lint
 
-      # --- ÉTAPE AJOUTÉE POUR L'OPTION A ---
-      - name: Renommer le package pour URL fixe
-        run: mv *.vsix experdeploy.vsix
+      - name: Compilation (webpack production)
+        run: npm run package
+
+      - name: Packaging du .vsix
+        run: npx vsce package --out experdeploy.vsix
+
+      - name: Vérification de l'asset généré
+        run: |
+          if [ ! -f "experdeploy.vsix" ]; then
+            echo "::error::experdeploy.vsix introuvable après packaging."
+            exit 1
+          fi
+          ls -lh experdeploy.vsix
 
       - name: Création de la Release GitHub
         uses: softprops/action-gh-release@v2
         with:
-          files: 'experdeploy.vsix' # On cible uniquement le fichier renommé
+          name: ExperteesDeploy v${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          files: experdeploy.vsix
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

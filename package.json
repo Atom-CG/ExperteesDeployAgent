@@ -1,13 +1,35 @@
 {
   "name": "expertees-deploy",
   "displayName": "ExperteesDeploy",
-  "description": "Agent ALM Power Platform et Code Apps",
-  "version": "0.0.1",
+  "description": "Agent ALM Power Platform et Code Apps — packagez et déployez vos Code Apps et solutions Dataverse sans quitter VS Code.",
+  "version": "1.0.5",
+  "publisher": "Atom-CG",
+  "author": {
+    "name": "Atom-CG"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Atom-CG/ExperteesDeployAgent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Atom-CG/ExperteesDeployAgent/issues"
+  },
+  "homepage": "https://github.com/Atom-CG/ExperteesDeployAgent#readme",
   "engines": {
     "vscode": "^1.124.0"
   },
   "categories": [
+    "Chat",
     "Other"
+  ],
+  "keywords": [
+    "power platform",
+    "power apps",
+    "dataverse",
+    "alm",
+    "code apps",
+    "copilot chat"
   ],
   "activationEvents": [],
   "main": "./dist/extension.js",
@@ -20,12 +42,6 @@
         "description": "Guide pas-à-pas pour packager et déployer vos Code Apps sur la Power Platform.",
         "isSticky": true
       }
-    ],
-    "commands": [
-      {
-        "command": "expertees-deploy.helloWorld",
-        "title": "Hello World"
-      }
     ]
   },
   "scripts": {
@@ -37,15 +53,17 @@
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "lint": "eslint src",
-    "test": "vscode-test"
+    "test": "vscode-test",
+    "package-vsix": "vsce package --out expertees-deploy.vsix"
   },
   "devDependencies": {
     "@types/vscode": "^1.124.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "24.x",
+    "@vscode/vsce": "^3.2.1",
     "typescript-eslint": "^8.61.1",
-    "eslint": "^10.5.0",
-    "typescript": "^6.0.3",
+    "eslint": "^9.17.0",
+    "typescript": "^5.7.2",
     "ts-loader": "^9.6.2",
     "webpack": "^5.107.2",
     "webpack-cli": "^7.0.3",

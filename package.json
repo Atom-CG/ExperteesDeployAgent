@@ -2,7 +2,7 @@
   "name": "expertees-deploy",
   "displayName": "ExperteesDeploy",
   "description": "Agent ALM Power Platform et Code Apps — packagez et déployez vos Code Apps et solutions Dataverse sans quitter VS Code.",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "publisher": "Atom-CG",
   "author": {
     "name": "Atom-CG"

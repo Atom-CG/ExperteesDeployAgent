@@ -401,7 +401,9 @@ function executerScriptSecuriseAvecBilan(
   // `$null -ne 0` => $true et la toute 1ère étape (souvent un cmdlet) est déclarée en
   // échec à tort, avec un "code de sortie: " vide dans le message. On combine donc le
   // test avec `$?` qui reflète correctement le succès/échec des cmdlets également.
-  terminal.sendText("$experdeployAbort = $false; $experdeployErreurs = @(); $global:LASTEXITCODE = 0");
+  terminal.sendText(
+    "$experdeployAbort = $false; $experdeployErreurs = @(); $global:LASTEXITCODE = 0",
+  );
 
   commandes.forEach((cmd, index) => {
     const etape = index + 1;
@@ -557,12 +559,8 @@ async function lancerPushCodeApp(
   threadId: string,
 ): Promise<void> {
   stream.markdown("⬆️ **Compilation et push en cours...**\n\n");
-  stream.markdown(
-    "> 1. `npm run build` — génération du dossier `dist`\n",
-  );
-  stream.markdown(
-    "> 2. `npx power-apps push` — envoi vers Dataverse\n\n",
-  );
+  stream.markdown("> 1. `npm run build` — génération du dossier `dist`\n");
+  stream.markdown("> 2. `npx power-apps push` — envoi vers Dataverse\n\n");
 
   // Script bloc unique : build + push avec gestion d'erreur intégrée.
   // En cas d'ApplicationNotFound, l'appId obsolète est supprimé de
@@ -721,7 +719,7 @@ try {
             `.trim();
 
   // Encodage Base64 dynamique à la volée
-  const setupBase64 = Buffer.from(setupJs).toString('base64');
+  const setupBase64 = Buffer.from(setupJs).toString("base64");
 
   // Génération du fichier temporaire .cjs et exécution (avec passage du dossier et du template)
   //
@@ -739,8 +737,9 @@ try {
     `Remove-Item $experdeploySetupPath -ErrorAction SilentlyContinue`,
   ];
 
-  if (framework === 'react') {
-    descriptionStack = 'React 19 + Vite 7 + React Router v7 + Zustand + Tailwind CSS v4 + shadcn/ui';
+  if (framework === "react") {
+    descriptionStack =
+      "React 19 + Vite 7 + React Router v7 + Zustand + Tailwind CSS v4 + shadcn/ui";
 
     const suiteCmds = [
       `npm install`,
@@ -752,21 +751,19 @@ try {
     ];
 
     if (enDansDossier) {
-      commandesInit = [
-        ...prepareAndScaffold('.', 'react-ts'),
-        ...suiteCmds,
-      ];
+      commandesInit = [...prepareAndScaffold(".", "react-ts"), ...suiteCmds];
     } else {
       commandesInit = [
-        ...prepareAndScaffold(nomProjet, 'react-ts'),
+        ...prepareAndScaffold(nomProjet, "react-ts"),
         `Set-Location "${nomProjet}"`,
         ...suiteCmds,
         `code .`,
       ];
     }
-  } else if (framework === 'angular') {
+  } else if (framework === "angular") {
     // Angular garde l'approche classique car @angular/cli a un flag --defaults parfait
-    descriptionStack = 'Angular 19 + Angular Router + NgRx Signals + Tailwind CSS v4';
+    descriptionStack =
+      "Angular 19 + Angular Router + NgRx Signals + Tailwind CSS v4";
     if (enDansDossier) {
       commandesInit = [
         `npx @angular/cli@latest new "${nomProjet}" --routing --style=css --skip-git --directory . --defaults`,
@@ -780,7 +777,8 @@ try {
       ];
     }
   } else {
-    descriptionStack = 'Vue 3.5 + Vite 7 + Pinia + vue-router 5 + Tailwind CSS v4 + shadcn-vue (Vega)';
+    descriptionStack =
+      "Vue 3.5 + Vite 7 + Pinia + vue-router 5 + Tailwind CSS v4 + shadcn-vue (Vega)";
 
     const suiteCmds = [
       `npm install`,
@@ -790,13 +788,10 @@ try {
     ];
 
     if (enDansDossier) {
-      commandesInit = [
-        ...prepareAndScaffold('.', 'vue-ts'),
-        ...suiteCmds,
-      ];
+      commandesInit = [...prepareAndScaffold(".", "vue-ts"), ...suiteCmds];
     } else {
       commandesInit = [
-        ...prepareAndScaffold(nomProjet, 'vue-ts'),
+        ...prepareAndScaffold(nomProjet, "vue-ts"),
         `Set-Location "${nomProjet}"`,
         ...suiteCmds,
         `code .`,
@@ -827,14 +822,14 @@ function lancerScaffold(
   );
   if (enDansDossier) {
     stream.markdown(
-      '> 📂 Installation dans le dossier de workspace actuel.\n\n',
+      "> 📂 Installation dans le dossier de workspace actuel.\n\n",
     );
     stream.markdown(
-      '> ⚠️ **Attention** : si ce dossier n\'est pas vide, les fichiers existants (hors `.git`) seront **supprimés** pour permettre le scaffolding Vite.\n\n',
+      "> ⚠️ **Attention** : si ce dossier n'est pas vide, les fichiers existants (hors `.git`) seront **supprimés** pour permettre le scaffolding Vite.\n\n",
     );
   }
   stream.markdown(
-    '> ⚙️ Configuration automatisée en cours (fichiers, alias et UI)...\n\n',
+    "> ⚙️ Configuration automatisée en cours (fichiers, alias et UI)...\n\n",
   );
 
   executerScriptSecuriseAvecBilan(
@@ -854,7 +849,6 @@ async function gererRequete(
   stream: vscode.ChatResponseStream,
   _jeton: vscode.CancellationToken,
 ): Promise<vscode.ChatResult> {
-
   let threadId: string;
   if (contexte.history.length > 0) {
     const newId = String(contexte.history[0]);
@@ -894,7 +888,12 @@ async function gererRequete(
         stream.markdown(
           `⚡ **Raccourci détecté** — initialisation directe de \`${nomProjetRaccourci}\` (${frameworkRaccourci}), sans passer par les étapes intermédiaires.\n\n`,
         );
-        lancerScaffold(stream, threadId, frameworkRaccourci, nomProjetRaccourci);
+        lancerScaffold(
+          stream,
+          threadId,
+          frameworkRaccourci,
+          nomProjetRaccourci,
+        );
         break;
       }
 
@@ -1018,7 +1017,11 @@ async function gererRequete(
         break;
       }
 
-      if (messageNormalise === "6" || messageNormalise === "maj" || messageNormalise === "update") {
+      if (
+        messageNormalise === "6" ||
+        messageNormalise === "maj" ||
+        messageNormalise === "update"
+      ) {
         stream.markdown("## ⬇️ **Mise à jour d'ExperDeploy**\n\n");
         stream.markdown(
           "> Téléchargement de la dernière release GitHub et réinstallation de l'extension dans le terminal...\n\n",
@@ -1026,9 +1029,9 @@ async function gererRequete(
         executerScriptSecurise([
           '$domain = "github.com"',
           '$path = "Atom-CG/ExperteesDeployAgent/releases/latest/download/experdeploy.vsix"',
-          'Invoke-WebRequest -Uri "https://$domain/$path" -OutFile "$env:TEMP\experdeploy.vsix"',
-          'code --install-extension "$env:TEMP\experdeploy.vsix"',
-          'Remove-Item "$env:TEMP\experdeploy.vsix"',
+          'Invoke-WebRequest -Uri "https://$domain/$path" -OutFile "$env:TEMP\\experdeploy.vsix"',
+          'code --install-extension "$env:TEMP\\experdeploy.vsix" --force',
+          'Remove-Item "$env:TEMP\\experdeploy.vsix"',
         ]);
         stream.markdown(
           "> ⚠️ Une fois l'installation terminée dans le terminal, **rechargez la fenêtre VS Code** (`Developer: Reload Window`) pour activer la nouvelle version.\n\n",
@@ -1097,13 +1100,13 @@ async function gererRequete(
     }
 
     // --- PHASE INIT PROJET : NOM & SCAFFOLD ---
-        case 'INIT_NOM_PROJET': {
-            if (!messageUtilisateur) break;
-            session.nomProjet = messageUtilisateur.trim();
-            const framework = session.frameworkChoisi || 'vue';
-            lancerScaffold(stream, threadId, framework, session.nomProjet);
-            break;
-        }
+    case "INIT_NOM_PROJET": {
+      if (!messageUtilisateur) break;
+      session.nomProjet = messageUtilisateur.trim();
+      const framework = session.frameworkChoisi || "vue";
+      lancerScaffold(stream, threadId, framework, session.nomProjet);
+      break;
+    }
 
     // --- PHASE EXPORT ---
     case "EXPORT_NOM_SOLUTION": {
@@ -1536,7 +1539,9 @@ function afficherMenuPrincipal(stream: vscode.ChatResponseStream): void {
   stream.markdown(
     "| **2** | `codeapp` | Transformer le projet en Power Apps Code App |\n",
   );
-  stream.markdown("| **3** | `run` | Démarrer le serveur local (connexion maintenue) |\n");
+  stream.markdown(
+    "| **3** | `run` | Démarrer le serveur local (connexion maintenue) |\n",
+  );
   stream.markdown("| **4** | `push` | Pousser le Code App (Inner-loop) |\n");
   stream.markdown(
     "| **5** | `connexion` | Gérer la connexion et sélectionner l'environnement Power Platform |\n",

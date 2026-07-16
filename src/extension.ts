@@ -10,10 +10,6 @@ type EtatConversation =
   | "MENU_PRINCIPAL"
   | "INIT_CHOIX_FRAMEWORK"
   | "INIT_NOM_PROJET"
-  | "EXPORT_NOM_SOLUTION"
-  | "EXPORT_ID_SOURCE"
-  | "IMPORT_NOM_SOLUTION"
-  | "IMPORT_ID_CIBLE"
   | "CODE_APP_MENU"
   | "CODE_APP_PREREQ_INSTALL"
   | "CODE_APP_INIT_CONFIRM"
@@ -21,21 +17,25 @@ type EtatConversation =
   | "CODE_APP_PUSH_CONFIRM"
   | "CONNEXION_CHOIX_COMPTE"
   | "CONNEXION_AJOUT_COMPTE"
-  | "CONNEXION_CHOIX_ENV";
+  | "CONNEXION_CHOIX_ENV"
+  | "CONNEXION_SAUV_PROPOSITION"
+  | "CONNEXION_SAUV_ALIAS";
 
 interface SessionALM {
   etat: EtatConversation;
   nomProjet: string;
   frameworkChoisi: string;
-  nomSolution: string;
-  idSource: string;
-  idCible: string;
   codeAppManquants: string[];
   compteIndex: number;
   environnementSelectionne: string;
 }
 
 const NOM_TERMINAL = "Power ALM ExperteesDeploy";
+// Pour l'inner-loop (`run`) : on sépare volontairement le serveur local (Vite/Angular/...)
+// et le proxy Power Apps dans deux terminaux distincts, pour que chaque process ait sa
+// propre sortie stdout lisible et son propre code de sortie observable.
+const NOM_TERMINAL_APP = "ExperteesDeploy - App (dev server)";
+const NOM_TERMINAL_PROXY = "ExperteesDeploy - Power Apps proxy";
 const sessions = new Map<string, SessionALM>();
 
 function obtenirOuCreerSession(threadId: string): SessionALM {
@@ -44,9 +44,6 @@ function obtenirOuCreerSession(threadId: string): SessionALM {
       etat: "MENU_PRINCIPAL",
       nomProjet: "",
       frameworkChoisi: "",
-      nomSolution: "",
-      idSource: "",
-      idCible: "",
       codeAppManquants: [],
       compteIndex: 0,
       environnementSelectionne: "",
@@ -65,27 +62,71 @@ function reinitialiserSession(threadId: string): void {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// LECTURE DE L'URL DU SERVEUR DEPUIS power.config.json
+// power.config.json — HELPERS GÉNÉRIQUES DE LECTURE/ÉCRITURE
 // ---------------------------------------------------------------------------
+// Toutes les fonctions ci-dessous lisaient/écrivaient power.config.json en dupliquant
+// le même enchaînement workspaceFolders → path.join → existsSync → readFileSync →
+// JSON.parse (+ try/catch). Centralisé ici : `lireConfig` pour la lecture brute,
+// `ecrireConfig` pour un patch fusionné (merge shallow avec le contenu existant).
 
-function lireUrlServeur(): string | undefined {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type PowerConfig = Record<string, any>;
+
+function cheminConfigPower(): string | undefined {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders || workspaceFolders.length === 0) {
     return undefined;
   }
+  return path.join(workspaceFolders[0].uri.fsPath, "power.config.json");
+}
 
-  const configPath = path.join(
-    workspaceFolders[0].uri.fsPath,
-    "power.config.json",
-  );
-  if (!fs.existsSync(configPath)) {
+function lireConfig(): PowerConfig | undefined {
+  const configPath = cheminConfigPower();
+  if (!configPath || !fs.existsSync(configPath)) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(configPath, "utf-8"));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Fusionne `patch` dans power.config.json (merge shallow avec le contenu existant).
+ * `creerSiAbsent` : si `false` (défaut), n'écrit rien tant que le fichier n'existe pas déjà
+ * — comportement d'origine de `mettreAJourLocalAppUrl`. Mettre `true` pour reproduire le
+ * comportement d'origine de `sauvegarderEnvironnementDansConfig`, qui créait le fichier.
+ */
+function ecrireConfig(patch: PowerConfig, creerSiAbsent = false): boolean {
+  const configPath = cheminConfigPower();
+  if (!configPath) return false;
+  if (!fs.existsSync(configPath) && !creerSiAbsent) return false;
+
+  const configActuelle = lireConfig() ?? {};
+  try {
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ ...configActuelle, ...patch }, null, 2),
+      "utf-8",
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// LECTURE DE L'URL DU SERVEUR DEPUIS power.config.json
+// ---------------------------------------------------------------------------
+
+function lireUrlServeur(): string | undefined {
+  const config = lireConfig();
+  if (!config) {
     return undefined;
   }
 
   try {
-    const raw = fs.readFileSync(configPath, "utf-8");
-    const config = JSON.parse(raw);
-
     // URL directe stockée dans le fichier
     if (typeof config.playUrl === "string") {
       return config.playUrl;
@@ -206,36 +247,19 @@ function detecterPortDevServeur(): { port: number; framework: string } {
   return { port: 3000, framework: "inconnu" };
 }
 
-// Met à jour le champ localAppUrl dans power.config.json
+// Met à jour le champ localAppUrl dans power.config.json.
+// N'écrit rien si le fichier n'existe pas encore (comportement d'origine).
 function mettreAJourLocalAppUrl(port: number): boolean {
-  const workspaceFolders = vscode.workspace.workspaceFolders;
-  if (!workspaceFolders || workspaceFolders.length === 0) {
-    return false;
-  }
-
-  const configPath = path.join(
-    workspaceFolders[0].uri.fsPath,
-    "power.config.json",
-  );
-  if (!fs.existsSync(configPath)) {
-    return false;
-  }
-
-  try {
-    const raw = fs.readFileSync(configPath, "utf-8");
-    const config = JSON.parse(raw);
-    config.localAppUrl = `http://localhost:${port}`;
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
-    return true;
-  } catch {
-    return false;
-  }
+  return ecrireConfig({ localAppUrl: `http://localhost:${port}` });
 }
 
 async function ouvrirNavigateurServeur(
   stream: vscode.ChatResponseStream,
 ): Promise<void> {
-  const DELAI_DEMARRAGE_MS = 3000;
+  // 8s au lieu de 3s : le run fait maintenant démarrer 2 processus en séquence
+  // (vite d'abord, attente TCP, puis power-apps run). Le proxy a besoin de temps
+  // supplémentaire pour tunneler avant que le lien navigateur ne soit fonctionnel.
+  const DELAI_DEMARRAGE_MS = 8000;
   await new Promise((resolve) => setTimeout(resolve, DELAI_DEMARRAGE_MS));
 
   const url = lireUrlServeur();
@@ -255,95 +279,115 @@ async function ouvrirNavigateurServeur(
 // GESTION DE L'ENVIRONNEMENT SÉLECTIONNÉ
 // ---------------------------------------------------------------------------
 
+// Sauvegarde l'environnement choisi (menu "connexion"). Contrairement à
+// `mettreAJourLocalAppUrl`, crée le fichier power.config.json s'il n'existe pas encore
+// (comportement d'origine).
 function sauvegarderEnvironnementDansConfig(envUrl: string): boolean {
-  const workspaceFolders = vscode.workspace.workspaceFolders;
-  if (!workspaceFolders || workspaceFolders.length === 0) {
-    return false;
-  }
-
-  const configPath = path.join(
-    workspaceFolders[0].uri.fsPath,
-    "power.config.json",
-  );
-  let config: Record<string, unknown> = {};
-  if (fs.existsSync(configPath)) {
-    try {
-      config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-    } catch {
-      /* démarrer avec un objet vide */
-    }
-  }
-
-  config.selectedEnvironment = envUrl;
-  try {
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
-    return true;
-  } catch {
-    return false;
-  }
+  return ecrireConfig({ selectedEnvironment: envUrl }, /* creerSiAbsent */ true);
 }
 
 // Relit le dernier environnement sauvegardé (pour proposer sa réutilisation par défaut).
 function lireEnvironnementSauvegarde(): string | undefined {
-  const workspaceFolders = vscode.workspace.workspaceFolders;
-  if (!workspaceFolders || workspaceFolders.length === 0) {
-    return undefined;
-  }
-
-  const configPath = path.join(
-    workspaceFolders[0].uri.fsPath,
-    "power.config.json",
-  );
-  if (!fs.existsSync(configPath)) {
-    return undefined;
-  }
-
-  try {
-    const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-    if (typeof config.selectedEnvironment === "string") {
-      return config.selectedEnvironment;
-    }
-  } catch {
-    /* ignore */
-  }
-  return undefined;
+  const config = lireConfig();
+  return typeof config?.selectedEnvironment === "string"
+    ? config.selectedEnvironment
+    : undefined;
 }
 
 // Relit l'ID d'environnement écrit par `power-apps init` dans power.config.json
 // (champ `environmentId`, distinct de `selectedEnvironment` géré par le menu "connexion").
 // Permet de rafraîchir la connexion PAC avant `run`/`push` SANS redemander l'ID à l'utilisateur.
 function lireEnvironmentIdCodeApp(): string | undefined {
+  const config = lireConfig();
+  const id = config?.environmentId ?? config?.environment_id;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// CONNEXIONS SAUVEGARDÉES DANS LE PROJET (.experdeploy.json)
+// ---------------------------------------------------------------------------
+// Stockage séparé de power.config.json : ce dernier est un fichier officiel Microsoft
+// susceptible d'être réécrit par `power-apps init`/`push` ; les préréglages ExperteesDeploy
+// vivent donc dans leur propre fichier, gitignorable ou versionnable au choix de l'équipe.
+
+interface ConnexionSauvegardee {
+  alias: string;
+  compteIndex: number;
+  environnementUrl: string;
+}
+
+interface ExperdeployProjectConfig {
+  connexions?: ConnexionSauvegardee[];
+}
+
+const FICHIER_CONFIG_EXPERDEPLOY = ".experdeploy.json";
+const ALIAS_VALIDE = /^[A-Za-z0-9._-]{1,32}$/;
+
+function cheminConfigExperdeploy(): string | undefined {
   const workspaceFolders = vscode.workspace.workspaceFolders;
-  if (!workspaceFolders || workspaceFolders.length === 0) {
-    return undefined;
-  }
+  if (!workspaceFolders || workspaceFolders.length === 0) return undefined;
+  return path.join(workspaceFolders[0].uri.fsPath, FICHIER_CONFIG_EXPERDEPLOY);
+}
 
-  const configPath = path.join(
-    workspaceFolders[0].uri.fsPath,
-    "power.config.json",
-  );
-  if (!fs.existsSync(configPath)) {
-    return undefined;
-  }
-
+function lireConfigExperdeploy(): ExperdeployProjectConfig {
+  const p = cheminConfigExperdeploy();
+  if (!p || !fs.existsSync(p)) return {};
   try {
-    const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-    const id = config.environmentId ?? config.environment_id;
-    if (typeof id === "string" && id.length > 0) {
-      return id;
-    }
+    return JSON.parse(fs.readFileSync(p, "utf-8")) as ExperdeployProjectConfig;
   } catch {
-    /* ignore */
+    return {};
   }
-  return undefined;
+}
+
+function ecrireConfigExperdeploy(cfg: ExperdeployProjectConfig): boolean {
+  const p = cheminConfigExperdeploy();
+  if (!p) return false;
+  try {
+    fs.writeFileSync(p, JSON.stringify(cfg, null, 2), "utf-8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function listerConnexionsSauvegardees(): ConnexionSauvegardee[] {
+  return lireConfigExperdeploy().connexions ?? [];
+}
+
+function trouverConnexionParAlias(alias: string): ConnexionSauvegardee | undefined {
+  const cible = alias.toLowerCase();
+  return listerConnexionsSauvegardees().find((c) => c.alias.toLowerCase() === cible);
+}
+
+/** Ajoute (ou remplace) une connexion sauvegardée. Retourne false si l'écriture échoue. */
+function sauvegarderConnexion(nouvelle: ConnexionSauvegardee): boolean {
+  const cfg = lireConfigExperdeploy();
+  const liste = cfg.connexions ?? [];
+  const idx = liste.findIndex(
+    (c) => c.alias.toLowerCase() === nouvelle.alias.toLowerCase(),
+  );
+  if (idx >= 0) liste[idx] = nouvelle;
+  else liste.push(nouvelle);
+  cfg.connexions = liste;
+  return ecrireConfigExperdeploy(cfg);
+}
+
+function supprimerConnexion(alias: string): boolean {
+  const cfg = lireConfigExperdeploy();
+  const liste = cfg.connexions ?? [];
+  const cible = alias.toLowerCase();
+  const restant = liste.filter((c) => c.alias.toLowerCase() !== cible);
+  if (restant.length === liste.length) return false; // rien à supprimer
+  cfg.connexions = restant;
+  return ecrireConfigExperdeploy(cfg);
 }
 
 // ---------------------------------------------------------------------------
 // UTILITAIRES TERMINAL
 // ---------------------------------------------------------------------------
 
-function obtenirOuCreerTerminal(): vscode.Terminal {
-  const existant = vscode.window.terminals.find((t) => t.name === NOM_TERMINAL);
+function obtenirOuCreerTerminalNomme(nom: string): vscode.Terminal {
+  const existant = vscode.window.terminals.find((t) => t.name === nom);
   if (existant) return existant;
 
   const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -352,7 +396,11 @@ function obtenirOuCreerTerminal(): vscode.Terminal {
       ? workspaceFolders[0].uri.fsPath
       : undefined;
 
-  return vscode.window.createTerminal({ name: NOM_TERMINAL, cwd: cwd });
+  return vscode.window.createTerminal({ name: nom, cwd: cwd });
+}
+
+function obtenirOuCreerTerminal(): vscode.Terminal {
+  return obtenirOuCreerTerminalNomme(NOM_TERMINAL);
 }
 
 function executerDansTerminal(commande: string): void {
@@ -361,7 +409,15 @@ function executerDansTerminal(commande: string): void {
   terminal.sendText(commande);
 }
 
-function executerScriptSecurise(commandes: string[]): void {
+/**
+ * Envoie une chaîne de commandes PowerShell au terminal, avec arrêt automatique à la
+ * première erreur (`$experdeployAbort`). Sans `options.bilan` : reproduit le comportement
+ * d'origine de `executerScriptSecurise` (message d'erreur générique par étape, pas de
+ * récapitulatif final). Avec `options.bilan` : reproduit `executerScriptSecuriseAvecBilan`
+ * (message d'erreur numéroté + code de sortie par étape, journal des erreurs, bilan final
+ * succès/échec).
+ */
+function executerScript(commandes: string[], options?: { bilan?: string }): void {
   const terminal = obtenirOuCreerTerminal();
   terminal.show(true);
 
@@ -376,45 +432,40 @@ function executerScriptSecurise(commandes: string[]): void {
   // boucle/script unique. `break` hors de tout `for`/`while` n'a donc aucun effet sur les
   // lignes suivantes déjà mises en file — elles s'exécutent quand même (bug observé : un
   // message "✅ succès" s'affichait après un échec réel de `npx power-apps init`). On
-  // utilise donc le même garde-fou `$experdeployAbort` que `executerScriptSecuriseAvecBilan`.
-  terminal.sendText("$experdeployAbort = $false; $global:LASTEXITCODE = 0");
+  // utilise donc le garde-fou `$experdeployAbort` dans les deux variantes.
+  const initVars = options?.bilan
+    ? "$experdeployAbort = $false; $experdeployErreurs = @(); $global:LASTEXITCODE = 0"
+    : "$experdeployAbort = $false; $global:LASTEXITCODE = 0";
+  terminal.sendText(initVars);
 
-  for (const cmd of commandes) {
-    const commandeSecurisee = `if (-not $experdeployAbort) { ${cmd}; if ((-not $?) -or ($LASTEXITCODE -ne 0)) { Write-Host '❌ Arrêt du script suite à une erreur.' -ForegroundColor Red; $experdeployAbort = $true } }`;
+  commandes.forEach((cmd, index) => {
+    const commandeSecurisee = options?.bilan
+      ? (() => {
+          const etape = index + 1;
+          return `if (-not $experdeployAbort) { ${cmd}; if ((-not $?) -or ($LASTEXITCODE -ne 0)) { $codeAffiche = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 'n/a' }; $msg = "❌ Étape ${etape}/${commandes.length} échouée (code de sortie: $codeAffiche)"; Write-Host $msg -ForegroundColor Red; $experdeployErreurs += $msg; $experdeployAbort = $true } }`;
+        })()
+      : `if (-not $experdeployAbort) { ${cmd}; if ((-not $?) -or ($LASTEXITCODE -ne 0)) { Write-Host '❌ Arrêt du script suite à une erreur.' -ForegroundColor Red; $experdeployAbort = $true } }`;
     terminal.sendText(commandeSecurisee);
+  });
+
+  if (options?.bilan) {
+    const messageEchappe = options.bilan.replace(/'/g, "''");
+    terminal.sendText(
+      `if ($experdeployAbort) { Write-Host ''; Write-Host '❌ ${messageEchappe} — ÉCHEC' -ForegroundColor Red; Write-Host '--- Journal des erreurs ---' -ForegroundColor Red; $experdeployErreurs | ForEach-Object { Write-Host $_ -ForegroundColor Red } } else { Write-Host ''; Write-Host '✅ ${messageEchappe} — SUCCÈS' -ForegroundColor Green }`,
+    );
   }
 }
 
-// Variante qui, en plus d'arrêter la chaîne de commandes à la première erreur,
-// journalise chaque erreur rencontrée (étape + code de sortie) et affiche un
-// message de bilan final (succès ou échec) une fois toutes les commandes traitées.
+// Wrappers conservés pour ne pas modifier les ~10 points d'appel existants dans le fichier.
+function executerScriptSecurise(commandes: string[]): void {
+  executerScript(commandes);
+}
+
 function executerScriptSecuriseAvecBilan(
   commandes: string[],
   messageSucces: string,
 ): void {
-  const terminal = obtenirOuCreerTerminal();
-  terminal.show(true);
-
-  // $LASTEXITCODE = 0 explicite : sans ça, sur un terminal neuf il vaut $null tant
-  // qu'aucune commande native n'a tourné. Or les cmdlets/.NET (WriteAllBytes, Remove-Item,
-  // Set-Location, ...) NE LE MODIFIENT JAMAIS. Résultat : `$LASTEXITCODE -ne 0` évalue
-  // `$null -ne 0` => $true et la toute 1ère étape (souvent un cmdlet) est déclarée en
-  // échec à tort, avec un "code de sortie: " vide dans le message. On combine donc le
-  // test avec `$?` qui reflète correctement le succès/échec des cmdlets également.
-  terminal.sendText(
-    "$experdeployAbort = $false; $experdeployErreurs = @(); $global:LASTEXITCODE = 0",
-  );
-
-  commandes.forEach((cmd, index) => {
-    const etape = index + 1;
-    const commandeSecurisee = `if (-not $experdeployAbort) { ${cmd}; if ((-not $?) -or ($LASTEXITCODE -ne 0)) { $codeAffiche = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 'n/a' }; $msg = "❌ Étape ${etape}/${commandes.length} échouée (code de sortie: $codeAffiche)"; Write-Host $msg -ForegroundColor Red; $experdeployErreurs += $msg; $experdeployAbort = $true } }`;
-    terminal.sendText(commandeSecurisee);
-  });
-
-  const messageEchappe = messageSucces.replace(/'/g, "''");
-  terminal.sendText(
-    `if ($experdeployAbort) { Write-Host ''; Write-Host '❌ ${messageEchappe} — ÉCHEC' -ForegroundColor Red; Write-Host '--- Journal des erreurs ---' -ForegroundColor Red; $experdeployErreurs | ForEach-Object { Write-Host $_ -ForegroundColor Red } } else { Write-Host ''; Write-Host '✅ ${messageEchappe} — SUCCÈS' -ForegroundColor Green }`,
-  );
+  executerScript(commandes, { bilan: messageSucces });
 }
 
 // ---------------------------------------------------------------------------
@@ -422,20 +473,62 @@ function executerScriptSecuriseAvecBilan(
 // ---------------------------------------------------------------------------
 
 function afficherMenuCodeApp(stream: vscode.ChatResponseStream): void {
-  stream.markdown("## 📱 **Power Apps Code App**\n\n");
-  stream.markdown(
-    "> Configurez votre projet actuel pour le connecter à Power Apps Code First.\n\n",
-  );
-  stream.markdown("---\n\n");
-  stream.markdown("| # | Action | Description |\n");
-  stream.markdown("|---|--------|-------------|\n");
-  stream.markdown(
-    "| **1** | `prérequis` | Vérifier et installer les prérequis |\n",
-  );
-  stream.markdown(
-    "| **2** | `initialiser` | Initialiser directement le projet |\n\n",
-  );
-  stream.markdown("> Tapez **menu** pour revenir au menu principal.\n");
+  stream.markdown(`## 📱 **Power Apps Code App**
+
+> Configurez votre projet actuel pour le connecter à Power Apps Code First.
+
+---
+
+| # | Action | Description |
+|---|--------|-------------|
+| **1** | \`prérequis\` | Vérifier et installer les prérequis |
+| **2** | \`initialiser\` | Initialiser directement le projet |
+
+> Tapez **menu** pour revenir au menu principal.
+`);
+}
+
+/** Affiche le menu de gestion de la connexion, avec la liste des connexions sauvegardées
+ *  dans `.experdeploy.json` si présentes. Déclenche `pac auth list` dans le terminal. */
+function afficherMenuConnexion(stream: vscode.ChatResponseStream): void {
+  const connexions = listerConnexionsSauvegardees();
+
+  stream.markdown(`## 🔐 **Gestion de la connexion Power Platform**
+
+> La liste de vos profils PAC s'affiche dans le terminal ci-dessous.
+
+`);
+  executerDansTerminal("pac auth list");
+
+  if (connexions.length > 0) {
+    const lignes = connexions
+      .map(
+        (c) =>
+          `| \`${c.alias}\` | Compte pac #${c.compteIndex} → ${c.environnementUrl} |`,
+      )
+      .join("\n");
+    stream.markdown(`
+### ⭐ Connexions sauvegardées dans ce projet
+
+| Alias | Cible |
+|-------|-------|
+${lignes}
+
+> Tapez l'**alias** pour basculer directement dessus (compte + environnement en une passe).
+
+`);
+  }
+
+  stream.markdown(`---
+
+| Saisie | Action |
+|--------|--------|
+| \`N°\` | Utiliser le profil pac correspondant (ex : \`1\`) |
+| \`0\` | Ajouter un nouveau compte |
+${connexions.length > 0 ? "| `alias` | Appliquer une connexion sauvegardée |\n| `del <alias>` | Supprimer une connexion sauvegardée |\n" : ""}| \`menu\` | Revenir au menu principal |
+
+> ⬆️ Consultez le terminal pour voir vos comptes disponibles, puis répondez ici.
+`);
 }
 
 async function verifierPrerequisCodeApp(
@@ -558,9 +651,12 @@ async function lancerPushCodeApp(
   stream: vscode.ChatResponseStream,
   threadId: string,
 ): Promise<void> {
-  stream.markdown("⬆️ **Compilation et push en cours...**\n\n");
-  stream.markdown("> 1. `npm run build` — génération du dossier `dist`\n");
-  stream.markdown("> 2. `npx power-apps push` — envoi vers Dataverse\n\n");
+  stream.markdown(`⬆️ **Compilation et push en cours...**
+
+> 1. \`npm run build\` — génération du dossier \`dist\`
+> 2. \`npx power-apps push\` — envoi vers Dataverse
+
+`);
 
   // Script bloc unique : build + push avec gestion d'erreur intégrée.
   // En cas d'ApplicationNotFound, l'appId obsolète est supprimé de
@@ -568,10 +664,46 @@ async function lancerPushCodeApp(
   const scriptPush = [
     `& {`,
     `Write-Host "🔨 Compilation du projet..." -ForegroundColor Cyan;`,
-    `npm run build;`,
+    // Capture de la sortie pour pouvoir détecter TS5101 (baseUrl déprécié en TS 5+) et
+    // auto-patcher les tsconfig si besoin. Utile pour les projets scaffoldés avant l'ajout
+    // de ignoreDeprecations dans le script d'init.
+    `$buildOut = npm run build 2>&1;`,
+    `$buildOut | ForEach-Object { Write-Host $_ };`,
     `if ($LASTEXITCODE -ne 0) {`,
-    `  Write-Host "❌ Compilation échouée. Corrigez les erreurs TypeScript/Vite avant de réessayer." -ForegroundColor Red;`,
-    `  return`,
+    `  $buildStr = $buildOut | Out-String;`,
+    `  if ($buildStr -match 'TS5101' -or $buildStr -match "Option 'baseUrl' is deprecated") {`,
+    `    Write-Host "";`,
+    `    Write-Host "⚠️ TS5101 détecté (baseUrl déprécié en TS 5+) — patch automatique en cours..." -ForegroundColor Yellow;`,
+    `    $patched = @();`,
+    `    foreach ($tsfile in @('tsconfig.app.json', 'tsconfig.json')) {`,
+    `      if (Test-Path $tsfile) {`,
+    `        $content = Get-Content $tsfile -Raw;`,
+    `        if ($content -notmatch 'ignoreDeprecations') {`,
+    `          if ($content -match '"compilerOptions"\\s*:\\s*\\{') {`,
+    `            $content = $content -replace '("compilerOptions"\\s*:\\s*\\{)', '$1' + [char]10 + '    "ignoreDeprecations": "6.0",';`,
+    `            Set-Content $tsfile -Value $content -Encoding UTF8;`,
+    `            $patched += $tsfile;`,
+    `          }`,
+    `        }`,
+    `      }`,
+    `    };`,
+    `    if ($patched.Count -gt 0) {`,
+    `      Write-Host "✅ Patché : $($patched -join ', ')" -ForegroundColor Green;`,
+    `      Write-Host "🔨 Nouvelle tentative de compilation..." -ForegroundColor Cyan;`,
+    `      npm run build;`,
+    `      if ($LASTEXITCODE -ne 0) {`,
+    `        Write-Host "❌ Compilation encore échouée après le patch. Corrigez les erreurs restantes." -ForegroundColor Red;`,
+    `        return`,
+    `      }`,
+    `    } else {`,
+    `      Write-Host "⚠️ Aucun tsconfig à patcher (ignoreDeprecations déjà présent ou pas de compilerOptions détecté)." -ForegroundColor Yellow;`,
+    `      Write-Host "❌ Corrigez manuellement les erreurs TypeScript avant de réessayer." -ForegroundColor Red;`,
+    `      return`,
+    `    }`,
+    `  } else {`,
+    `    Write-Host "❌ Compilation échouée. Corrigez les erreurs TypeScript/Vite avant de réessayer." -ForegroundColor Red;`,
+    `    return`,
+    `  }`,
     `};`,
     `Write-Host "⬆️ Push vers Dataverse..." -ForegroundColor Cyan;`,
     `$pushOut = npx power-apps push 2>&1;`,
@@ -658,20 +790,25 @@ try {
         process.chdir(target);
     }
 
-    console.log('🔧 Application des patchs Expertime...');
+    console.log('🔧 Application des patchs...');
     // shadcn/shadcn-vue lisent les alias de chemin dans le tsconfig.json RACINE (pas seulement
     // tsconfig.app.json) : sans "baseUrl"/"paths" à la racine, l'init échoue avec "Could not load
     // the workspace config ... configure its path aliases". Il faut donc patcher les DEUX fichiers.
+    //
+    // ⚠️ TS 5.5+ marque "baseUrl" comme déprécié et remonte TS5101 comme erreur bloquante en
+    // mode strict. On ajoute "ignoreDeprecations": "6.0" en parallèle : workaround officiel
+    // Microsoft qui conserve le comportement TS 6 (baseUrl fonctionnel) jusqu'à TS 7.
     function patchTsconfig(file) {
         if (!fs.existsSync(file)) { return; }
         let ts = fs.readFileSync(file, 'utf8');
         if (ts.includes('"baseUrl"')) { return; }
+        const inject = '\\n    "ignoreDeprecations": "6.0",\\n    "baseUrl": ".",\\n    "paths": { "@/*": ["./src/*"] },';
         if (ts.includes('"compilerOptions": {')) {
-            ts = ts.replace('"compilerOptions": {', '"compilerOptions": {\\n    "baseUrl": ".",\\n    "paths": { "@/*": ["./src/*"] },');
+            ts = ts.replace('"compilerOptions": {', '"compilerOptions": {' + inject);
         } else {
             // tsconfig.json racine de type "solution" (juste files/references, pas de compilerOptions)
             const idx = ts.indexOf('{');
-            ts = ts.slice(0, idx + 1) + '\\n  "compilerOptions": {\\n    "baseUrl": ".",\\n    "paths": { "@/*": ["./src/*"] }\\n  },' + ts.slice(idx + 1);
+            ts = ts.slice(0, idx + 1) + '\\n  "compilerOptions": {' + inject.replace(/,$/, '') + '\\n  },' + ts.slice(idx + 1);
         }
         fs.writeFileSync(file, ts);
     }
@@ -821,16 +958,17 @@ function lancerScaffold(
     `🏗️ **Création du projet \`${nomProjet}\` — ${descriptionStack}**\n\n`,
   );
   if (enDansDossier) {
-    stream.markdown(
-      "> 📂 Installation dans le dossier de workspace actuel.\n\n",
-    );
-    stream.markdown(
-      "> ⚠️ **Attention** : si ce dossier n'est pas vide, les fichiers existants (hors `.git`) seront **supprimés** pour permettre le scaffolding Vite.\n\n",
-    );
+    stream.markdown(`> 📂 Installation dans le dossier de workspace actuel.
+
+> ⚠️ **Attention** : si ce dossier n'est pas vide, les fichiers existants (hors \`.git\`) seront **supprimés** pour permettre le scaffolding Vite.
+
+`);
   }
-  stream.markdown(
-    "> ⚙️ Configuration automatisée en cours (fichiers, alias et UI)...\n\n",
-  );
+  stream.markdown(`> ⚙️ Configuration automatisée en cours (fichiers, alias et UI)...
+
+> 👀 **Surveillez le terminal** : certaines commandes (\`npm\`, \`shadcn\`, Angular CLI, création Vite) peuvent afficher des **prompts de confirmation** — répondez-y au fur et à mesure sinon le script reste bloqué.
+
+`);
 
   executerScriptSecuriseAvecBilan(
     commandesInit,
@@ -849,17 +987,33 @@ async function gererRequete(
   stream: vscode.ChatResponseStream,
   _jeton: vscode.CancellationToken,
 ): Promise<vscode.ChatResult> {
-  let threadId: string;
-  if (contexte.history.length > 0) {
-    const newId = String(contexte.history[0]);
-    if (!sessions.has(newId) && sessions.has("thread_default")) {
-      sessions.set(newId, sessions.get("thread_default")!);
-      sessions.delete("thread_default");
+  // Récupère le threadId stocké dans les métadonnées de la dernière réponse de l'agent
+  // (voir le `return` en fin de fonction). `String(contexte.history[0])` — utilisé
+  // auparavant — retournait "[object Object]" pour TOUTES les conversations (un
+  // ChatRequestTurn n'a pas de toString() utile), ce qui faisait partager la même
+  // session à toutes les discussions Copilot ouvertes en parallèle.
+  let threadId: string | undefined;
+  for (let i = contexte.history.length - 1; i >= 0; i--) {
+    const tour = contexte.history[i];
+    if (tour instanceof vscode.ChatResponseTurn) {
+      const idTrouve = (tour.result?.metadata as { experdeployThreadId?: string } | undefined)
+        ?.experdeployThreadId;
+      if (typeof idTrouve === "string") {
+        threadId = idTrouve;
+        break;
+      }
     }
-    threadId = newId;
-  } else {
-    threadId = "thread_default";
   }
+  threadId ??= `thread-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  // Purge défensive : évite que `sessions` grossisse indéfiniment sur une session VS Code
+  // longue durée (chaque nouvelle conversation Copilot crée un threadId inédit).
+  const LIMITE_SESSIONS = 50;
+  if (sessions.size >= LIMITE_SESSIONS) {
+    const plusAncien = sessions.keys().next().value;
+    if (plusAncien) sessions.delete(plusAncien);
+  }
+
   const session = obtenirOuCreerSession(threadId);
   const messageUtilisateur = requete.prompt.trim();
   const messageNormalise = messageUtilisateur.toLowerCase();
@@ -899,28 +1053,31 @@ async function gererRequete(
 
       if (messageNormalise === "1" || messageNormalise === "init") {
         session.etat = "INIT_CHOIX_FRAMEWORK";
-        stream.markdown("## 🏗️ Initialisation d'un nouveau projet\n\n");
-        stream.markdown("### Stack technique Expertime — Vue (par défaut)\n\n");
-        stream.markdown("| Couche | Technologie |\n");
-        stream.markdown("|--------|-------------|\n");
-        stream.markdown(
-          '| **Framework** | Vue 3.5 (`<script setup lang="ts">`) |\n',
-        );
-        stream.markdown("| **Build** | Vite 7 + vue-tsc |\n");
-        stream.markdown("| **État** | Pinia (setup stores) |\n");
-        stream.markdown(
-          "| **Routing** | vue-router 5 — `createWebHashHistory` |\n",
-        );
-        stream.markdown("| **UI** | shadcn-vue Vega + Tailwind CSS v4 |\n");
-        stream.markdown("| **URLs** | Relatives uniquement |\n\n");
-        stream.markdown("---\n\n");
-        stream.markdown("**Que souhaitez-vous faire ?**\n\n");
-        stream.markdown("| # | Choix |\n");
-        stream.markdown("|---|-------|\n");
-        stream.markdown("| **1** | Continuer avec Vue (stack par défaut) |\n");
-        stream.markdown("| **2** | Utiliser React à la place |\n");
-        stream.markdown("| **3** | Utiliser Angular à la place |\n");
-        stream.markdown("| **0** | Revenir au menu principal |\n\n");
+        stream.markdown(`## 🏗️ Initialisation d'un nouveau projet
+
+### Stack technique — Vue (par défaut)
+
+| Couche | Technologie |
+|--------|-------------|
+| **Framework** | Vue 3.5 (\`<script setup lang="ts">\`) |
+| **Build** | Vite 7 + vue-tsc |
+| **État** | Pinia (setup stores) |
+| **Routing** | vue-router 5 — \`createWebHashHistory\` |
+| **UI** | shadcn-vue Vega + Tailwind CSS v4 |
+| **URLs** | Relatives uniquement |
+
+---
+
+**Que souhaitez-vous faire ?**
+
+| # | Choix |
+|---|-------|
+| **1** | Continuer avec Vue (stack par défaut) |
+| **2** | Utiliser React à la place |
+| **3** | Utiliser Angular à la place |
+| **0** | Revenir au menu principal |
+
+`);
         break;
       }
 
@@ -935,49 +1092,72 @@ async function gererRequete(
         const localAppUrlMisAJour = mettreAJourLocalAppUrl(portDev);
         const environmentId = lireEnvironmentIdCodeApp();
 
-        stream.markdown(
-          "▶️ **Lancement du serveur de développement Code App...**\n\n",
-        );
+        stream.markdown(`▶️ **Lancement du serveur de développement Code App...**
+
+`);
         if (localAppUrlMisAJour) {
           stream.markdown(
             `> 🔧 Framework détecté : **${framework}** — \`localAppUrl\` mis à jour → \`http://localhost:${portDev}\` dans \`power.config.json\`\n\n`,
           );
         }
 
-        // ⚠️ `npm run dev & npx power-apps run` était FAUX à deux titres :
-        // 1. `&` n'est pas un séparateur de commandes en PowerShell (contrairement à bash) —
-        //    la syntaxe ne lance pas réellement les deux commandes en parallèle de façon fiable.
-        // 2. Le script `dev` du template Power Apps Code App (créé par `power-apps init`)
-        //    lance DÉJÀ le proxy Power Apps ET le serveur Vite ensemble — `npx power-apps run`
-        //    en plus est redondant et peut relancer un flow d'auth CLI séparé, expliquant le
-        //    "redemande l'ID d'environnement" au moment du run.
-        // FIX : on rafraîchit d'abord la connexion PAC (silencieusement, avec l'`environmentId`
-        // déjà connu via `power.config.json`, sans jamais redemander à l'utilisateur), puis on
-        // lance uniquement `npm run dev` (recommandation officielle Microsoft Learn).
+        // NOTE (2026-07-16) : deux terminaux DISTINCTS.
+        // Terminal 1 (App) : `npm run dev` — DOIT démarrer en premier pour que le port
+        // local soit à l'écoute avant que le proxy Power Apps ne tente de le tunneler.
+        // Terminal 2 (Proxy) : attend en TCP que le port local réponde, PUIS lance
+        // `npx power-apps run`. Sans ce garde-fou, le proxy sortait en erreur
+        // "app can not be found" parce que Vite n'était pas encore prêt.
+        //
+        // `pac auth create --deviceCode` a été RETIRÉ ici : il polluait `pac auth list`
+        // avec un nouveau profil à chaque `run`, et bloquait le flux en mode interactif.
+        // `pac env select --environment <id>` suffit à aligner le contexte pac sur le bon
+        // env avant que `power-apps run` s'en serve, et échoue clairement si non authentifié.
         if (environmentId) {
           stream.markdown(
-            `> 🔐 Connexion Power Platform maintenue sur l'environnement \`${environmentId}\`.\n\n`,
+            `> 🔐 Alignement du contexte pac sur l'environnement \`${environmentId}\`.\n\n`,
           );
-          executerScriptSecurise([
-            `pac auth create --environment "${environmentId}" --deviceCode`,
-            `npm run dev`,
-          ]);
         } else {
           stream.markdown(
             "> ⚠️ Aucun `environmentId` détecté dans `power.config.json` — initialisez d'abord le projet (`codeapp` puis `initialiser`) si ce n'est pas déjà fait.\n\n",
           );
-          executerDansTerminal("npm run dev");
         }
 
-        stream.markdown(
-          `> ℹ️ L'avertissement _"NOT currently running"_ est **normal** — le serveur (port ${portDev}) prend quelques secondes à démarrer.\n\n`,
-        );
-        stream.markdown(
-          `> ⚠️ **Si le message persiste après 30 secondes**, vérifiez que votre config expose bien le port ${portDev} :\n`,
-        );
-        stream.markdown(
-          `> \`\`\`js\n> export default {\n>   server: { port: ${portDev} }\n> }\n> \`\`\`\n\n`,
-        );
+        // --- Terminal 1 : serveur local ---
+        const terminalApp = obtenirOuCreerTerminalNomme(NOM_TERMINAL_APP);
+        terminalApp.show(true);
+        if (environmentId) {
+          terminalApp.sendText(`pac env select --environment "${environmentId}"`);
+        }
+        terminalApp.sendText("npm run dev");
+
+        // --- Terminal 2 : proxy Power Apps, avec attente TCP sur le port local ---
+        // Timeout : 60 * 500ms = 30 secondes, largement de quoi laisser Vite/Angular démarrer.
+        // Test TCP via TcpClient : plus rapide et plus fiable que Test-NetConnection.
+        const scriptAttenteEtProxy = [
+          `Write-Host "⏳ Attente du serveur local sur le port ${portDev}..." -ForegroundColor Cyan`,
+          `$experdeployPret = $false`,
+          `for ($i = 0; $i -lt 60; $i++) { try { $tcp = [Net.Sockets.TcpClient]::new('localhost', ${portDev}); $tcp.Close(); $experdeployPret = $true; break } catch { Start-Sleep -Milliseconds 500 } }`,
+          `if ($experdeployPret) { Write-Host "✅ Serveur local détecté sur ${portDev} — lancement du proxy Power Apps." -ForegroundColor Green } else { Write-Host "⚠️ Serveur local non détecté après 30s — lancement du proxy quand même, mais le lien risque d'échouer." -ForegroundColor Yellow }`,
+          `npx power-apps run`,
+        ].join("; ");
+        const terminalProxy = obtenirOuCreerTerminalNomme(NOM_TERMINAL_PROXY);
+        // false → ne vole pas le focus du terminal 1, l'utilisateur voit vite démarrer d'abord.
+        terminalProxy.show(false);
+        terminalProxy.sendText(scriptAttenteEtProxy);
+
+        stream.markdown(`> ℹ️ Deux terminaux sont ouverts : **${NOM_TERMINAL_APP}** (Vite/Angular) et **${NOM_TERMINAL_PROXY}** (proxy Power Apps, démarre automatiquement dès que le port ${portDev} répond).
+
+> ⚠️ **Si le message _"NOT currently running"_ persiste après 30 secondes**, vérifiez que votre config expose bien le port ${portDev} :
+> \`\`\`js
+> export default { server: { port: ${portDev} } }
+> \`\`\`
+
+> ❓ **Si le lien navigateur renvoie "app can not be found"** :
+> 1. \`appId\` obsolète dans \`power.config.json\` → lancez un **\`push\` (menu 4)**, il purge l'\`appId\` cassé et régénère.
+> 2. Profil pac connecté sur un autre tenant/env que celui du projet → menu **\`connexion\` (5)** pour aligner.
+> 3. Auth expirée → \`pac auth create --environment <id> --deviceCode\` manuellement dans un des terminaux.
+
+`);
         ouvrirNavigateurServeur(stream);
         reinitialiserSession(threadId);
         break;
@@ -985,35 +1165,20 @@ async function gererRequete(
 
       if (messageNormalise === "4" || messageNormalise === "push") {
         session.etat = "CODE_APP_PUSH_CONFIRM";
-        stream.markdown("## ⬆️ Push du Code App vers Dataverse\n\n");
-        stream.markdown(
-          "> Cette opération va **compiler le projet** (`npm run build`) puis **pousser le code** vers votre environnement Power Platform via `npx power-apps push`.\n\n",
-        );
-        stream.markdown("**Confirmez-vous le push ?**\n\n");
-        stream.markdown(
-          "> Répondez **oui** pour lancer le push, ou **non** pour revenir au menu principal.\n",
-        );
+        stream.markdown(`## ⬆️ Push du Code App vers Dataverse
+
+> Cette opération va **compiler le projet** (\`npm run build\`) puis **pousser le code** vers votre environnement Power Platform via \`npx power-apps push\`.
+
+**Confirmez-vous le push ?**
+
+> Répondez **oui** pour lancer le push, ou **non** pour revenir au menu principal.
+`);
         break;
       }
 
       if (messageNormalise === "5" || messageNormalise === "connexion") {
         session.etat = "CONNEXION_CHOIX_COMPTE";
-        stream.markdown("## 🔐 **Gestion de la connexion Power Platform**\n\n");
-        stream.markdown(
-          "> La liste de vos profils PAC s'affiche dans le terminal ci-dessous.\n\n",
-        );
-        executerDansTerminal("pac auth list");
-        stream.markdown("---\n\n");
-        stream.markdown("| Saisie | Action |\n");
-        stream.markdown("|--------|--------|\n");
-        stream.markdown(
-          "| `N°` | Utiliser le compte correspondant (ex : `1`) |\n",
-        );
-        stream.markdown("| `0` | Ajouter un nouveau compte |\n");
-        stream.markdown("| `menu` | Revenir au menu principal |\n\n");
-        stream.markdown(
-          "> ⬆️ Consultez le terminal pour voir vos comptes disponibles, puis répondez ici.\n",
-        );
+        afficherMenuConnexion(stream);
         break;
       }
 
@@ -1105,96 +1270,6 @@ async function gererRequete(
       session.nomProjet = messageUtilisateur.trim();
       const framework = session.frameworkChoisi || "vue";
       lancerScaffold(stream, threadId, framework, session.nomProjet);
-      break;
-    }
-
-    // --- PHASE EXPORT ---
-    case "EXPORT_NOM_SOLUTION": {
-      if (!messageUtilisateur) break;
-      session.nomSolution = messageUtilisateur;
-      session.etat = "EXPORT_ID_SOURCE";
-
-      stream.markdown(`✅ Solution : **${session.nomSolution}**\n\n`);
-      stream.markdown(
-        "Quel est l'**ID de l'environnement source** (où se trouve l'application) ?\n",
-      );
-      stream.markdown(
-        "> _(Cela permet de rafraîchir votre authentification MFA avant l'export)_",
-      );
-      break;
-    }
-
-    case "EXPORT_ID_SOURCE": {
-      if (!messageUtilisateur) break;
-      session.idSource = messageUtilisateur;
-
-      stream.markdown(`🔄 **Authentification et Export en cours...**\n\n`);
-      stream.markdown(
-        "Le terminal gère l'export. Pendant ce temps, voici comment remplir le fichier qui va s'ouvrir :\n\n",
-      );
-
-      // Le tutoriel qui remplace les commentaires JSON
-      stream.markdown(
-        "### 📖 Comment remplir le fichier `deploymentsettings.json` ?\n",
-      );
-      stream.markdown(
-        "1. Allez sur `make.powerapps.com` > **Environnement Cible** > **Connexions**.\n",
-      );
-      stream.markdown(
-        "2. Cliquez sur chaque connexion requise (Dataverse, O365, etc.).\n",
-      );
-      stream.markdown(
-        "3. Copiez l'ID (le GUID) situé à la toute fin de l'URL de votre navigateur.\n",
-      );
-      stream.markdown(
-        '4. Collez cet ID dans le champ `"ConnectionId": ""` correspondant.\n',
-      );
-      stream.markdown(
-        "5. Sauvegardez le fichier (`Ctrl+S`), puis tapez `@Expertees-Deploy 4`.\n\n",
-      );
-
-      // Ajout de la commande "code" à la fin du script pour ouvrir le fichier !
-      const commandesExport = [
-        `pac auth create --environment ${session.idSource} --deviceCode`,
-        `pac solution export --name ${session.nomSolution} --path ./exports --managed false`,
-        `pac solution export --name ${session.nomSolution} --path ./exports --managed true`,
-        `pac solution create-settings --solution-zip ./exports/${session.nomSolution}_managed.zip --settings-file ./deploymentsettings.json`,
-        `code ./deploymentsettings.json`, // Ouvre automatiquement le fichier dans l'éditeur
-      ];
-      executerScriptSecurise(commandesExport);
-
-      reinitialiserSession(threadId);
-      break;
-    }
-
-    // --- PHASE IMPORT ---
-    case "IMPORT_NOM_SOLUTION": {
-      if (!messageUtilisateur) break;
-      session.nomSolution = messageUtilisateur;
-      session.etat = "IMPORT_ID_CIBLE";
-      stream.markdown(
-        `✅ Solution : **${session.nomSolution}**\n\nQuel est l\'**ID de l\'environnement cible** ?`,
-      );
-      break;
-    }
-
-    case "IMPORT_ID_CIBLE": {
-      if (!messageUtilisateur) break;
-      session.idCible = messageUtilisateur;
-
-      stream.markdown(
-        `🔥 **Lancement du déploiement vers ${session.idCible} !**\n\n`,
-      );
-
-      // Utilisation de --environment au lieu de --url
-      const commandesImport = [
-        `pac auth create --environment ${session.idCible} --deviceCode`,
-        `pac auth select --index 1`,
-        `pac solution import --path ./exports/${session.nomSolution}_managed.zip --settings-file ./deploymentsettings.json`,
-      ];
-      executerScriptSecurise(commandesImport);
-
-      reinitialiserSession(threadId);
       break;
     }
 
@@ -1354,15 +1429,21 @@ async function gererRequete(
 
       if (messageNormalise === "0") {
         session.etat = "CONNEXION_AJOUT_COMPTE";
-        stream.markdown("## ➕ **Ajout d'un nouveau compte**\n\n");
-        stream.markdown(
-          "> Un code et une URL vont s'afficher dans le terminal — ouvrez l'URL dans un navigateur et saisissez le code pour vous authentifier sur Power Platform.\n\n",
-        );
-        executerDansTerminal("pac auth create --deviceCode");
-        stream.markdown("---\n\n");
-        stream.markdown(
-          "Une fois l'authentification terminée dans le navigateur, tapez **suite** pour voir la liste des environnements disponibles.\n",
-        );
+        stream.markdown(`## ➕ **Ajout d'un nouveau compte**
+
+> Un **popup navigateur** va s'ouvrir automatiquement pour vous authentifier sur Microsoft Entra ID (SSO utilisé si disponible).
+
+`);
+        // NOTE (2026-07-16) : `--deviceCode` retiré → flow interactif direct (popup WAM sur
+        // Windows / navigateur système avec callback localhost sur Mac/Linux). Fallback
+        // manuel possible via `pac auth create --deviceCode` si l'environnement le bloque.
+        executerDansTerminal("pac auth create");
+        stream.markdown(`---
+
+> ℹ️ Si le popup ne s'ouvre pas (env corporate, WSL, session distante) : tapez \`pac auth create --deviceCode\` manuellement dans le terminal pour repasser au device code flow.
+
+Une fois l'authentification terminée dans le navigateur, tapez **suite** pour voir la liste des environnements disponibles.
+`);
         break;
       }
 
@@ -1376,16 +1457,59 @@ async function gererRequete(
         );
         executerDansTerminal("pac env list");
         session.etat = "CONNEXION_CHOIX_ENV";
-        stream.markdown("---\n\n");
-        stream.markdown("**Quel environnement souhaitez-vous utiliser ?**\n\n");
+        stream.markdown(`---
+
+**Quel environnement souhaitez-vous utiliser ?**
+
+> Tapez l'**URL** ou l'**ID** de l'environnement (visible dans le terminal), ou \`menu\` pour revenir.
+`);
+        break;
+      }
+
+      // --- Suppression d'une connexion sauvegardée ---
+      const matchDel = messageUtilisateur.trim().match(/^del\s+(.+)$/i);
+      if (matchDel) {
+        const aliasCible = matchDel[1].trim();
+        if (supprimerConnexion(aliasCible)) {
+          stream.markdown(
+            `🗑️ Connexion \`${aliasCible}\` supprimée de \`.experdeploy.json\`.\n\n`,
+          );
+        } else {
+          stream.markdown(
+            `⚠️ Aucune connexion nommée \`${aliasCible}\` à supprimer.\n\n`,
+          );
+        }
+        afficherMenuConnexion(stream);
+        break;
+      }
+
+      // --- Application d'une connexion sauvegardée par son alias ---
+      const connexion = trouverConnexionParAlias(messageUtilisateur.trim());
+      if (connexion) {
+        session.compteIndex = connexion.compteIndex;
+        session.environnementSelectionne = connexion.environnementUrl;
+        stream.markdown(`## ♻️ Application de la connexion sauvegardée **\`${connexion.alias}\`**
+
+> Compte pac #${connexion.compteIndex} → \`${connexion.environnementUrl}\`
+
+`);
+        executerScriptSecurise([
+          `pac auth select --index ${connexion.compteIndex}`,
+          `pac env select --environment "${connexion.environnementUrl}"`,
+          `Write-Host "✅ Connexion '${connexion.alias.replace(/'/g, "''")}' appliquée." -ForegroundColor Green`,
+        ]);
+        // Mémoriser aussi dans power.config.json pour que codeapp/run le réutilisent
+        sauvegarderEnvironnementDansConfig(connexion.environnementUrl);
         stream.markdown(
-          "> Tapez l'**URL** ou l'**ID** de l'environnement (visible dans le terminal), ou `menu` pour revenir.\n",
+          "> 💾 Environnement propagé dans `power.config.json`.\n\n---\n\n↩️ Retour au menu principal.\n",
         );
+        reinitialiserSession(threadId);
+        afficherMenuPrincipal(stream);
         break;
       }
 
       stream.markdown(
-        "❓ Saisie non reconnue. Tapez un **numéro de compte**, `0` pour ajouter un compte, ou `menu` pour revenir.\n",
+        "❓ Saisie non reconnue. Tapez un **numéro de compte pac**, un **alias sauvegardé**, `0` pour ajouter un compte, `del <alias>` pour supprimer, ou `menu`.\n",
       );
       break;
     }
@@ -1404,11 +1528,12 @@ async function gererRequete(
         );
         executerDansTerminal("pac env list");
         session.etat = "CONNEXION_CHOIX_ENV";
-        stream.markdown("---\n\n");
-        stream.markdown("**Quel environnement souhaitez-vous utiliser ?**\n\n");
-        stream.markdown(
-          "> Tapez l'**URL** ou l'**ID** de l'environnement (visible dans le terminal), ou `menu` pour revenir.\n",
-        );
+        stream.markdown(`---
+
+**Quel environnement souhaitez-vous utiliser ?**
+
+> Tapez l'**URL** ou l'**ID** de l'environnement (visible dans le terminal), ou \`menu\` pour revenir.
+`);
         break;
       }
 
@@ -1431,8 +1556,11 @@ async function gererRequete(
       const envChoisi = messageUtilisateur.trim();
       session.environnementSelectionne = envChoisi;
 
-      stream.markdown(`## 🌍 **Sélection de l'environnement**\n\n`);
-      stream.markdown(`> Environnement choisi : \`${envChoisi}\`\n\n`);
+      stream.markdown(`## 🌍 **Sélection de l'environnement**
+
+> Environnement choisi : \`${envChoisi}\`
+
+`);
 
       executerScriptSecurise([
         `pac env select --environment "${envChoisi}"`,
@@ -1440,19 +1568,83 @@ async function gererRequete(
       ]);
 
       const sauvegarde = sauvegarderEnvironnementDansConfig(envChoisi);
-      if (sauvegarde) {
-        stream.markdown(
-          "> 💾 Environnement sauvegardé dans `power.config.json`.\n\n",
-        );
-      } else {
-        stream.markdown(
-          "> ℹ️ Aucun fichier `power.config.json` trouvé — l'environnement n'a pas été sauvegardé localement.\n\n",
-        );
+      stream.markdown(
+        sauvegarde
+          ? "> 💾 Environnement sauvegardé dans `power.config.json`.\n\n"
+          : "> ℹ️ Aucun fichier `power.config.json` trouvé — l'environnement n'a pas été sauvegardé localement.\n\n",
+      );
+
+      // Propose la sauvegarde de cette combinaison (compte + env) comme préréglage
+      // réutilisable via un alias, à condition qu'un workspace soit ouvert.
+      if (cheminConfigExperdeploy() && session.compteIndex > 0) {
+        session.etat = "CONNEXION_SAUV_PROPOSITION";
+        stream.markdown(`---
+
+**Souhaitez-vous sauvegarder cette connexion (compte pac #${session.compteIndex} + \`${envChoisi}\`) comme préréglage rapide ?**
+
+> Répondez **oui** pour lui donner un alias, ou **non** pour revenir au menu principal.
+`);
+        break;
       }
 
-      stream.markdown("---\n\n");
       stream.markdown(
-        "✅ **Connexion et environnement configurés.** Retour au menu principal.\n\n",
+        "---\n\n✅ **Connexion et environnement configurés.** Retour au menu principal.\n\n",
+      );
+      reinitialiserSession(threadId);
+      afficherMenuPrincipal(stream);
+      break;
+    }
+
+    // --- CONNEXION : PROPOSITION DE SAUVEGARDE ---
+    case "CONNEXION_SAUV_PROPOSITION": {
+      if (messageNormalise === "oui" || messageNormalise === "o" || messageNormalise === "yes") {
+        session.etat = "CONNEXION_SAUV_ALIAS";
+        stream.markdown(`## 💾 Sauvegarde de la connexion
+
+Sous quel **alias** ? (lettres, chiffres, \`.\`, \`_\`, \`-\` — max 32 caractères)
+
+> _Ex : \`client-A-dev\`, \`prod\`, \`sandbox\`_
+> Si l'alias existe déjà, il sera **remplacé**. Tapez \`menu\` pour annuler.
+`);
+        break;
+      }
+      if (messageNormalise === "non" || messageNormalise === "n" || messageNormalise === "no" || messageNormalise === "menu") {
+        stream.markdown("↩️ Sauvegarde ignorée. Retour au menu principal.\n\n");
+        reinitialiserSession(threadId);
+        afficherMenuPrincipal(stream);
+        break;
+      }
+      stream.markdown("❓ Répondez **oui** pour sauvegarder, ou **non** pour revenir au menu.\n");
+      break;
+    }
+
+    // --- CONNEXION : SAISIE DE L'ALIAS ---
+    case "CONNEXION_SAUV_ALIAS": {
+      if (messageNormalise === "menu" || messageNormalise === "retour") {
+        reinitialiserSession(threadId);
+        afficherMenuPrincipal(stream);
+        break;
+      }
+      const alias = messageUtilisateur.trim();
+      if (!ALIAS_VALIDE.test(alias)) {
+        stream.markdown(
+          "❌ Alias invalide. Utilisez uniquement lettres, chiffres, `.`, `_`, `-` (max 32 caractères).\n",
+        );
+        break;
+      }
+      const ok = sauvegarderConnexion({
+        alias,
+        compteIndex: session.compteIndex,
+        environnementUrl: session.environnementSelectionne,
+      });
+      stream.markdown(
+        ok
+          ? `✅ Connexion sauvegardée dans \`.experdeploy.json\` sous l'alias **\`${alias}\`**.
+
+> Prochainement, tapez simplement \`${alias}\` dans le menu **connexion** pour la ré-appliquer.
+
+`
+          : "⚠️ Impossible d'écrire dans `.experdeploy.json`. Vérifiez les droits du dossier.\n\n",
       );
       reinitialiserSession(threadId);
       afficherMenuPrincipal(stream);
@@ -1471,17 +1663,20 @@ async function gererRequete(
           `> ♻️ Réutilisation de l'environnement précédent : \`${envId}\`\n\n`,
         );
       }
-      stream.markdown(`## ⚙️ Configuration du projet en Code App\n\n`);
-      stream.markdown(`🌍 ID d'environnement : **${envId}**\n\n`);
-      stream.markdown("### Étapes lancées dans le terminal :\n");
-      stream.markdown(
-        "1. 🔐 Authentification sur l'environnement Power Platform\n",
-      );
-      stream.markdown("2. 📦 Installation du SDK **@microsoft/power-apps**\n");
-      stream.markdown("3. 🔧 Initialisation du projet Code App\n\n");
-      stream.markdown(
-        "> ✅ Suivez les instructions dans le terminal. Une fois terminé, utilisez **3** (`run`) pour démarrer le serveur local.\n\n",
-      );
+      stream.markdown(`## ⚙️ Configuration du projet en Code App
+
+🌍 ID d'environnement : **${envId}**
+
+### Étapes lancées dans le terminal :
+1. 🔐 Authentification Power Platform — **un popup navigateur va s'ouvrir automatiquement** pour la connexion (Microsoft Entra ID)
+2. 📦 Installation du SDK **@microsoft/power-apps**
+3. 🔧 Initialisation du projet Code App
+
+> ✅ Validez la connexion dans le popup, puis suivez les instructions dans le terminal. Une fois terminé, utilisez **3** (\`run\`) pour démarrer le serveur local.
+
+> ℹ️ Si le popup ne s'ouvre pas (environnement corporate qui bloque le callback \`localhost\`, WSL, session distante) : \`pac auth create --environment "${envId}" --deviceCode\` manuellement dans le terminal pour repasser au device code flow.
+
+`);
 
       // NOTE (2026-07-16) : `npx power-apps init` gère sa PROPRE session
       // d'authentification/son PROPRE cache de token MSAL (fichier
@@ -1507,8 +1702,15 @@ async function gererRequete(
       ].join("; ");
 
       const commandesCodeApp = [
-        `Write-Host "🔐 Authentification Power Platform..." -ForegroundColor Cyan`,
-        `pac auth create --environment "${envId}" --deviceCode`,
+        `Write-Host "🔐 Authentification Power Platform (popup navigateur)..." -ForegroundColor Cyan`,
+        // NOTE (2026-07-16) : `--deviceCode` RETIRÉ.
+        // Sans ce flag, `pac auth create` bascule en flow interactif : sur Windows un popup
+        // WAM (Web Account Manager) natif s'ouvre — ou à défaut le navigateur système avec
+        // callback localhost — au lieu d'imposer le "va sur microsoft.com/devicelogin et
+        // tape ce code" du device flow. UX beaucoup plus fluide, surtout avec SSO actif.
+        // En cas d'échec (env corporate qui bloque le callback localhost, WSL, etc.),
+        // relancer manuellement `pac auth create --environment "${envId}" --deviceCode`.
+        `pac auth create --environment "${envId}"`,
         `Write-Host "📦 Installation du SDK @microsoft/power-apps..." -ForegroundColor Cyan`,
         `npm install @microsoft/power-apps`,
         commandeInitAvecRetryAuth,
@@ -1528,35 +1730,30 @@ async function gererRequete(
       reinitialiserSession(threadId);
       break;
     }
+  }
 
-  return {};
+  return { metadata: { experdeployThreadId: threadId } };
 }
 
 function afficherMenuPrincipal(stream: vscode.ChatResponseStream): void {
-  stream.markdown("# 🚀 Bienvenue sur **ExperteesDeploy**\n\n");
-  stream.markdown(
-    "> Votre assistant de déploiement Power Platform. Il vous guide pas à pas pour exporter, configurer et importer vos solutions Dataverse entre environnements, directement depuis VS Code.\n\n",
-  );
-  stream.markdown("---\n\n");
-  stream.markdown("## Menu principal\n\n");
-  stream.markdown("| # | Action | Description |\n");
-  stream.markdown("|---|--------|-------------|\n");
-  stream.markdown(
-    "| **1** | `init` | Initialiser un projet front-end (Vue · React · Angular) avec la stack Expertime |\n",
-  );
-  stream.markdown(
-    "| **2** | `codeapp` | Transformer le projet en Power Apps Code App |\n",
-  );
-  stream.markdown(
-    "| **3** | `run` | Démarrer le serveur local (connexion maintenue) |\n",
-  );
-  stream.markdown("| **4** | `push` | Pousser le Code App (Inner-loop) |\n");
-  stream.markdown(
-    "| **5** | `connexion` | Gérer la connexion et sélectionner l'environnement Power Platform |\n",
-  );
-  stream.markdown(
-    "| **6** | `maj` | Mettre à jour l'extension ExperDeploy vers la dernière version |\n\n",
-  );
+  stream.markdown(`# 🚀 Bienvenue sur **ExperteesDeploy**
+
+> Votre assistant de déploiement Power Platform. Il vous guide pas à pas pour scaffolder, configurer et déployer vos Code Apps et solutions Dataverse, directement depuis VS Code.
+
+---
+
+## Menu principal
+
+| # | Action | Description |
+|---|--------|-------------|
+| **1** | \`init\` | Initialiser un projet front-end (Vue · React · Angular) |
+| **2** | \`codeapp\` | Transformer le projet en Power Apps Code App |
+| **3** | \`run\` | Démarrer le serveur local (connexion maintenue) |
+| **4** | \`push\` | Pousser le Code App (Inner-loop) |
+| **5** | \`connexion\` | Gérer la connexion et sélectionner l'environnement Power Platform |
+| **6** | \`maj\` | Mettre à jour l'extension ExperDeploy vers la dernière version |
+
+`);
 }
 
 export function activate(context: vscode.ExtensionContext) {

@@ -54,7 +54,7 @@
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "lint": "eslint src",
     "test": "vscode-test",
-    "package-vsix": "vsce package --out expertees-deploy.vsix"
+    "package-vsix": "vsce package --out experdeploy.vsix"
   },
   "devDependencies": {
     "@types/vscode": "^1.124.0",

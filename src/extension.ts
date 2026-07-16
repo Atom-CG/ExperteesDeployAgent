@@ -1483,19 +1483,27 @@ async function gererRequete(
         "> ✅ Suivez les instructions dans le terminal. Une fois terminé, utilisez **3** (`run`) pour démarrer le serveur local.\n\n",
       );
 
-      // NOTE (2026-07-10) : `npx power-apps init` gère sa PROPRE session
-      // d'authentification, distincte de celle de `pac` — un `pac auth create
-      // --deviceCode` réussi juste avant ne suffit donc pas toujours à éviter un
-      // AADSTS70043 (refresh token expiré) au moment où `power-apps init` tente sa
-      // propre auth silencieuse. Si ça échoue, on relance automatiquement une
-      // authentification INTERACTIVE (`pac auth create` SANS `--deviceCode`, donc avec
-      // ouverture automatique du popup navigateur) puis on retente `power-apps init`
-      // une seule fois, sans action manuelle de l'utilisateur.
+      // NOTE (2026-07-16) : `npx power-apps init` gère sa PROPRE session
+      // d'authentification/son PROPRE cache de token MSAL (fichier
+      // %LOCALAPPDATA%\.IdentityService\msal.cache), complètement distinct de celui de
+      // `pac` — un `pac auth create` (même interactif, même réussi) NE rafraîchit PAS ce
+      // cache. Symptôme observé en usage réel : AADSTS70043 (refresh token expiré par une
+      // politique de fréquence de connexion / conditional access) qui persiste à
+      // l'identique après un `pac auth create` pourtant réussi entre-deux, car
+      // `power-apps init` retente avec son propre vieux token en cache.
+      //
+      // Le fix utilise la commande OFFICIELLE `power-apps logout` (confirmée via
+      // `power-apps --help` — "Clear all cached credentials. Removes every cached account
+      // and the active-account pointer.") plutôt qu'une suppression manuelle du fichier de
+      // cache : plus robuste si Microsoft fait évoluer le format/emplacement du cache.
+      // Après `logout`, le cache étant vide, `npx power-apps init` redéclenche
+      // automatiquement son propre flux de login navigateur — pas besoin d'appeler
+      // `power-apps login` explicitement.
       const commandeInitAvecRetryAuth = [
         `Write-Host "🔧 Initialisation du projet Code App..." -ForegroundColor Cyan`,
         `$global:LASTEXITCODE = 0`,
         `npx power-apps init`,
-        `if ($LASTEXITCODE -ne 0) { Write-Host "⚠️ Échec probable dû à une session expirée. Nouvelle authentification (popup navigateur)..." -ForegroundColor Yellow; pac auth create --environment "${envId}"; $global:LASTEXITCODE = 0; npx power-apps init }`,
+        `if ($LASTEXITCODE -ne 0) { Write-Host "⚠️ Échec probable dû à une session expirée. Déconnexion et nouvelle authentification (popup navigateur)..." -ForegroundColor Yellow; npx power-apps logout; pac auth create --environment "${envId}"; $global:LASTEXITCODE = 0; npx power-apps init; if ($LASTEXITCODE -ne 0) { Write-Host "❌ Échec persistant après déconnexion et réauthentification. Vérifiez manuellement votre connexion (menu 5) puis relancez l'initialisation." -ForegroundColor Red } }`,
       ].join("; ");
 
       const commandesCodeApp = [
@@ -1513,13 +1521,13 @@ async function gererRequete(
       // classique. `executerScriptSecurise` (sendText, identique à une saisie manuelle)
       // reste utilisé ici ; c'est le contenu de `commandeInitAvecRetryAuth` (script
       // PowerShell auto-suffisant, sans dépendance à un événement VS Code) qui gère
-      // désormais la reconnexion automatique en cas d'échec de `power-apps init`.
+      // désormais la reconnexion automatique ET la déconnexion propre du cache
+      // `power-apps` en cas d'échec de `npx power-apps init`.
       executerScriptSecurise(commandesCodeApp);
 
       reinitialiserSession(threadId);
       break;
     }
-  }
 
   return {};
 }

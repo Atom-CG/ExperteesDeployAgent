@@ -69,7 +69,6 @@ function reinitialiserSession(threadId: string): void {
 // JSON.parse (+ try/catch). Centralisé ici : `lireConfig` pour la lecture brute,
 // `ecrireConfig` pour un patch fusionné (merge shallow avec le contenu existant).
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type PowerConfig = Record<string, any>;
 
 function cheminConfigPower(): string | undefined {
@@ -100,8 +99,12 @@ function lireConfig(): PowerConfig | undefined {
  */
 function ecrireConfig(patch: PowerConfig, creerSiAbsent = false): boolean {
   const configPath = cheminConfigPower();
-  if (!configPath) return false;
-  if (!fs.existsSync(configPath) && !creerSiAbsent) return false;
+  if (!configPath) {
+    return false;
+  }
+  if (!fs.existsSync(configPath) && !creerSiAbsent) {
+    return false;
+  }
 
   const configActuelle = lireConfig() ?? {};
   try {
@@ -325,7 +328,9 @@ const ALIAS_VALIDE = /^[A-Za-z0-9._-]{1,32}$/;
 
 function cheminConfigExperdeploy(): string | undefined {
   const workspaceFolders = vscode.workspace.workspaceFolders;
-  if (!workspaceFolders || workspaceFolders.length === 0) return undefined;
+  if (!workspaceFolders || workspaceFolders.length === 0) {
+    return undefined;
+  }
   return path.join(workspaceFolders[0].uri.fsPath, FICHIER_CONFIG_EXPERDEPLOY);
 }
 
@@ -341,7 +346,9 @@ function lireConfigExperdeploy(): ExperdeployProjectConfig {
 
 function ecrireConfigExperdeploy(cfg: ExperdeployProjectConfig): boolean {
   const p = cheminConfigExperdeploy();
-  if (!p) return false;
+  if (!p) {
+    return false;
+  }
   try {
     fs.writeFileSync(p, JSON.stringify(cfg, null, 2), "utf-8");
     return true;
@@ -366,8 +373,11 @@ function sauvegarderConnexion(nouvelle: ConnexionSauvegardee): boolean {
   const idx = liste.findIndex(
     (c) => c.alias.toLowerCase() === nouvelle.alias.toLowerCase(),
   );
-  if (idx >= 0) liste[idx] = nouvelle;
-  else liste.push(nouvelle);
+  if (idx >= 0) {
+    liste[idx] = nouvelle;
+  } else {
+    liste.push(nouvelle);
+  }
   cfg.connexions = liste;
   return ecrireConfigExperdeploy(cfg);
 }
@@ -377,7 +387,9 @@ function supprimerConnexion(alias: string): boolean {
   const liste = cfg.connexions ?? [];
   const cible = alias.toLowerCase();
   const restant = liste.filter((c) => c.alias.toLowerCase() !== cible);
-  if (restant.length === liste.length) return false; // rien à supprimer
+  if (restant.length === liste.length) {
+    return false; // rien à supprimer
+  }
   cfg.connexions = restant;
   return ecrireConfigExperdeploy(cfg);
 }
@@ -388,7 +400,9 @@ function supprimerConnexion(alias: string): boolean {
 
 function obtenirOuCreerTerminalNomme(nom: string): vscode.Terminal {
   const existant = vscode.window.terminals.find((t) => t.name === nom);
-  if (existant) return existant;
+  if (existant) {
+    return existant;
+  }
 
   const workspaceFolders = vscode.workspace.workspaceFolders;
   const cwd =
@@ -1011,7 +1025,9 @@ async function gererRequete(
   const LIMITE_SESSIONS = 50;
   if (sessions.size >= LIMITE_SESSIONS) {
     const plusAncien = sessions.keys().next().value;
-    if (plusAncien) sessions.delete(plusAncien);
+    if (plusAncien) {
+      sessions.delete(plusAncien);
+    }
   }
 
   const session = obtenirOuCreerSession(threadId);
@@ -1212,7 +1228,9 @@ async function gererRequete(
 
     // --- PHASE INIT PROJET : CHOIX DU FRAMEWORK ---
     case "INIT_CHOIX_FRAMEWORK": {
-      if (!messageUtilisateur) break;
+      if (!messageUtilisateur) {
+        break;
+      }
 
       if (
         messageNormalise === "0" ||
@@ -1266,7 +1284,9 @@ async function gererRequete(
 
     // --- PHASE INIT PROJET : NOM & SCAFFOLD ---
     case "INIT_NOM_PROJET": {
-      if (!messageUtilisateur) break;
+      if (!messageUtilisateur) {
+        break;
+      }
       session.nomProjet = messageUtilisateur.trim();
       const framework = session.frameworkChoisi || "vue";
       lancerScaffold(stream, threadId, framework, session.nomProjet);
@@ -1551,7 +1571,9 @@ Une fois l'authentification terminée dans le navigateur, tapez **suite** pour v
         break;
       }
 
-      if (!messageUtilisateur) break;
+      if (!messageUtilisateur) {
+        break;
+      }
 
       const envChoisi = messageUtilisateur.trim();
       session.environnementSelectionne = envChoisi;

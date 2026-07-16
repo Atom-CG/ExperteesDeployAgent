@@ -15,10 +15,10 @@ jobs:
 
     steps:
       - name: Checkout du dépôt
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Installation de Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: "npm"
@@ -59,7 +59,7 @@ jobs:
           ls -lh experdeploy.vsix
 
       - name: Création de la Release GitHub
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: ExperteesDeploy v${{ steps.version.outputs.version }}
           generate_release_notes: true

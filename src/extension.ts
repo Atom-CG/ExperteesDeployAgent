@@ -20,7 +20,8 @@ type EtatConversation =
   | "CONNEXION_CHOIX_ENV"
   | "CONNEXION_SAUV_PROPOSITION"
   | "CONNEXION_SAUV_ALIAS"
-  | "MAJ_CONFIRM";
+  | "MAJ_CONFIRM"
+  | "MAJ_RELOAD_CONFIRM";
 
 interface SessionALM {
   etat: EtatConversation;
@@ -1293,10 +1294,16 @@ async function gererRequete(
           'code --install-extension "$env:TEMP\\experdeploy.vsix" --force',
           'Remove-Item "$env:TEMP\\experdeploy.vsix"',
         ]);
-        stream.markdown(
-          "> ⚠️ Une fois l'installation terminée dans le terminal, **rechargez la fenêtre VS Code** (`Developer: Reload Window`) pour activer la nouvelle version.\n\n",
-        );
-        reinitialiserSession(threadId);
+        session.etat = "MAJ_RELOAD_CONFIRM";
+        stream.markdown(`> ⚠️ **Attendez la fin de l'installation dans le terminal** (message final \`Extension 'Atom-CG.expertees-deploy' v1.x.x was successfully installed\`) **AVANT de répondre ci-dessous**, sinon l'installation risque d'être corrompue.
+
+---
+
+**Souhaitez-vous recharger VS Code automatiquement une fois l'installation terminée ?**
+
+> **oui** — recharge la fenêtre (\`Developer: Reload Window\`) pour activer la nouvelle version. La conversation Copilot Chat actuelle sera fermée mais l'historique reste conservé.
+> **non** — vous rechargerez manuellement plus tard via \`Ctrl+Shift+P\` → \`Developer: Reload Window\`.
+`);
         break;
       }
 
@@ -1315,6 +1322,47 @@ async function gererRequete(
 
       stream.markdown(
         "❓ Répondez **oui** pour lancer la mise à jour, ou **non** pour revenir au menu.\n",
+      );
+      break;
+    }
+
+    // --- MISE À JOUR DE L'EXTENSION : RELOAD AUTOMATIQUE ---
+    case "MAJ_RELOAD_CONFIRM": {
+      if (
+        messageNormalise === "oui" ||
+        messageNormalise === "o" ||
+        messageNormalise === "yes" ||
+        messageNormalise === "y"
+      ) {
+        stream.markdown(
+          "🔄 **Rechargement de la fenêtre VS Code...** À dans quelques secondes !\n",
+        );
+        reinitialiserSession(threadId);
+        // reloadWindow tue le process courant → pas besoin d'await, l'extension host redémarre.
+        // NOTE : commande VS Code officielle et publique, utilisée par les extension packs Microsoft.
+        vscode.commands.executeCommand("workbench.action.reloadWindow");
+        break;
+      }
+
+      if (
+        messageNormalise === "non" ||
+        messageNormalise === "n" ||
+        messageNormalise === "no" ||
+        messageNormalise === "menu" ||
+        messageNormalise === "retour"
+      ) {
+        stream.markdown(`↩️ Pas de rechargement automatique.
+
+> Pour activer la nouvelle version quand vous êtes prêt : \`Ctrl+Shift+P\` → **Developer: Reload Window**.
+
+`);
+        reinitialiserSession(threadId);
+        afficherMenuPrincipal(stream);
+        break;
+      }
+
+      stream.markdown(
+        "❓ Répondez **oui** pour recharger VS Code, ou **non** pour le faire manuellement plus tard.\n",
       );
       break;
     }

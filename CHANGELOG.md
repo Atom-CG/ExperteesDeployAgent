@@ -4,6 +4,11 @@ All notable changes to the "experdeploy" extension will be documented in this fi
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [1.1.4] - 2026-07-16
+
+### Added
+- Menu `maj` : après le téléchargement/installation, l'extension propose un **rechargement automatique** de VS Code (`Developer: Reload Window`) avec confirmation **oui/non**. `non` affiche le raccourci pour le faire manuellement plus tard.
+
 ## [1.1.3] - 2026-07-16
 
 ### Changed

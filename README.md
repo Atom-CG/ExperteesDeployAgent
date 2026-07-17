@@ -3,10 +3,33 @@
 [![Version](https://img.shields.io/badge/version-1.0.9-blue)](https://github.com/Atom-CG/ExperteesDeployAgent/releases/latest)
 [![VS Code](https://img.shields.io/badge/VS%20Code-%5E1.124.0-007ACC)](https://code.visualstudio.com/)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
+[![AI Credits](https://img.shields.io/badge/Copilot%20AI%20Credits-0%20consommé-brightgreen)](#-zéro-consommation-copilot--compatible-gouvernance-ia)
 
-**Chat Participant GitHub Copilot** pour VS Code qui automatise le cycle de vie des projets **Power Apps Code App** (Code First) et la gestion des environnements **Power Platform**.
+**Chat Participant GitHub Copilot** pour VS Code qui automatise le cycle de vie des projets **Power Apps Code App** (Code First).
 
 Une machine d'état conversationnelle pilote le terminal VS Code et vous guide via un menu numéroté : scaffolding, initialisation Code App, inner-loop (`run` / `push`), gestion des connexions `pac`. L'objectif : supprimer les erreurs de manipulation sur les phases critiques (authentification, ports, `appId` obsolète).
+
+---
+
+## 💚 Zéro consommation Copilot — compatible gouvernance IA
+
+**ExperteesDeploy n'appelle aucun modèle de langage.** L'extension utilise l'interface Copilot Chat comme **frontend conversationnel**, mais tout le traitement est **déterministe** (machine d'état + scripts PowerShell). Concrètement :
+
+| Ressource | Consommation |
+|-----------|--------------|
+| Tokens / AI Credits GitHub Copilot | **0** |
+| Requêtes Copilot Chat (rate-limit) | **0** |
+| Appels API vers un LLM (OpenAI, Anthropic, Azure OpenAI…) | **0** |
+| Données envoyées à un service IA externe | **aucune** |
+
+### Ce que ça implique
+
+- ✅ **Compatible avec les politiques DLP / gouvernance IA** les plus strictes — aucun traitement IA à documenter côté client
+- ✅ **Aucun impact** sur votre quota mensuel d'AI Credits Copilot (nouveau modèle de facturation à la consommation en vigueur depuis le 1er juin 2026)
+- ✅ **Utilisable avec Copilot Free** — pas besoin d'un plan Pro/Business pour faire tourner l'agent
+- ⚠️ **Prérequis** : GitHub Copilot Chat doit être installé et activé pour que l'API `chatParticipant` soit disponible (mais aucun appel modèle n'est effectué)
+
+> Techniquement : le handler du participant lit le texte brut de l'utilisateur (`request.prompt`), le route dans une `switch` sur l'état courant, et répond via `stream.markdown()` avec des templates statiques. Aucun `vscode.lm.sendChatRequest()` ni équivalent n'est présent dans le code.
 
 ---
 
@@ -15,7 +38,7 @@ Une machine d'état conversationnelle pilote le terminal VS Code et vous guide v
 | Prérequis | Version | Notes |
 |-----------|---------|-------|
 | VS Code | ≥ 1.124.0 | |
-| GitHub Copilot Chat | — | requis (l'agent est un Chat Participant) |
+| GitHub Copilot Chat | — | requis pour l'API Chat Participant (**aucune conso de tokens**) |
 | Node.js | ≥ 20 LTS | |
 | Git | — | |
 | Power Platform CLI (`pac`) | à jour | via l'extension *Power Platform Tools* ou `dotnet tool install` |
@@ -65,6 +88,8 @@ Le menu principal s'affiche. Répondez avec le **numéro** ou le **mot-clé** de
 | **6** | `maj` | Mettre à jour l'extension vers la dernière release |
 
 Tapez `menu` (ou `reset`) à tout moment pour revenir au menu principal.
+
+> 🧠 **Aucun modèle IA n'est sollicité** lorsque vous interagissez avec l'agent — vos messages ne sortent pas de votre poste, ils sont uniquement matchés contre les mots-clés du menu.
 
 ---
 
@@ -169,6 +194,15 @@ L'agent liste ensuite les environnements (`pac env list`) ; saisissez l'**URL** 
 
 ---
 
+## 🔒 Confidentialité & sécurité
+
+- **Aucune télémétrie** émise par l'extension.
+- **Aucune donnée** (code, `power.config.json`, credentials `pac`) n'est envoyée hors de votre poste.
+- Les authentifications utilisent les flows **officiels Microsoft** (`pac auth create`, `power-apps init`) — aucun secret n'est stocké par l'extension elle-même.
+- Le code source est **auditable** ([`src/extension.ts`](./src/extension.ts)) — mono-fichier, ~1800 lignes, sans dépendance runtime.
+
+---
+
 ## 🛠️ Développement
 
 ```bash
@@ -184,12 +218,12 @@ npm install
 | `npm run package` | Build production (`--devtool hidden-source-map`) |
 | `npm run lint` | ESLint sur `src` |
 | `npm test` | Tests via `vscode-test` |
-| `npm run package-vsix` | Génère `expertees-deploy.vsix` |
+| `npm run package-vsix` | Génère `experdeploy.vsix` |
 
 **Architecture** — extension mono-fichier (`src/extension.ts`) :
 
 - Machine d'état `EtatConversation` + `Map<threadId, SessionALM>`
-- `gererRequete` : dispatch `switch` sur l'état courant
+- `gererRequete` : dispatch `switch` sur l'état courant (**purement déterministe, aucun appel LLM**)
 - Helpers terminal : `executerDansTerminal`, `executerScriptSecurise` (arrêt à la 1ʳᵉ erreur), `executerScriptSecuriseAvecBilan` (+ journal des erreurs et bilan final)
 - Helpers `power.config.json` : lecture/écriture des champs ci-dessus
 

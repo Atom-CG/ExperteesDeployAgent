@@ -338,7 +338,9 @@ function cheminConfigExperdeploy(): string | undefined {
 
 function lireConfigExperdeploy(): ExperdeployProjectConfig {
   const p = cheminConfigExperdeploy();
-  if (!p || !fs.existsSync(p)) return {};
+  if (!p || !fs.existsSync(p)) {
+    return {};
+  }
   try {
     return JSON.parse(fs.readFileSync(p, "utf-8")) as ExperdeployProjectConfig;
   } catch {

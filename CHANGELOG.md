@@ -4,6 +4,11 @@ All notable changes to the "experdeploy" extension will be documented in this fi
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [1.1.5] - 2026-07-16
+
+### Fixed
+- Correction d'un dernier warning ESLint `curly` (accolades manquantes) sur `lireConfigExperdeploy`, ligne 339.
+
 ## [1.1.4] - 2026-07-16
 
 ### Added

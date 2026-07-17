@@ -4,6 +4,11 @@ All notable changes to the "experdeploy" extension will be documented in this fi
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [1.1.3] - 2026-07-16
+
+### Changed
+- Menu `maj`/`update`/`6` : ajout d'une confirmation **oui/non** avant de télécharger et réinstaller l'extension (auparavant lancé immédiatement sans validation). `non`/`menu`/`retour` annule proprement.
+
 ## [1.1.2] - 2026-07-16
 
 ### Fixed

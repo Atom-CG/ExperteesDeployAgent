@@ -19,7 +19,8 @@ type EtatConversation =
   | "CONNEXION_AJOUT_COMPTE"
   | "CONNEXION_CHOIX_ENV"
   | "CONNEXION_SAUV_PROPOSITION"
-  | "CONNEXION_SAUV_ALIAS";
+  | "CONNEXION_SAUV_ALIAS"
+  | "MAJ_CONFIRM";
 
 interface SessionALM {
   etat: EtatConversation;
@@ -1257,7 +1258,31 @@ async function gererRequete(
         messageNormalise === "maj" ||
         messageNormalise === "update"
       ) {
-        stream.markdown("## ⬇️ **Mise à jour d'ExperDeploy**\n\n");
+        session.etat = "MAJ_CONFIRM";
+        stream.markdown(`## ⬇️ **Mise à jour d'ExperteesDeploy**
+
+> Cette opération va télécharger la dernière release GitHub (\`experdeploy.vsix\`) et réinstaller l'extension dans VS Code, en écrasant la version actuelle.
+
+**Confirmez-vous la mise à jour ?**
+
+> Répondez **oui** pour lancer la mise à jour, ou **non** pour revenir au menu principal.
+`);
+        break;
+      }
+
+      stream.markdown("❓ Choix non reconnu.\n\n");
+      afficherMenuPrincipal(stream);
+      break;
+    }
+
+    // --- MISE À JOUR DE L'EXTENSION : CONFIRMATION ---
+    case "MAJ_CONFIRM": {
+      if (
+        messageNormalise === "oui" ||
+        messageNormalise === "o" ||
+        messageNormalise === "yes" ||
+        messageNormalise === "y"
+      ) {
         stream.markdown(
           "> Téléchargement de la dernière release GitHub et réinstallation de l'extension dans le terminal...\n\n",
         );
@@ -1275,8 +1300,22 @@ async function gererRequete(
         break;
       }
 
-      stream.markdown("❓ Choix non reconnu.\n\n");
-      afficherMenuPrincipal(stream);
+      if (
+        messageNormalise === "non" ||
+        messageNormalise === "n" ||
+        messageNormalise === "no" ||
+        messageNormalise === "menu" ||
+        messageNormalise === "retour"
+      ) {
+        stream.markdown("↩️ Mise à jour annulée. Retour au menu principal.\n\n");
+        reinitialiserSession(threadId);
+        afficherMenuPrincipal(stream);
+        break;
+      }
+
+      stream.markdown(
+        "❓ Répondez **oui** pour lancer la mise à jour, ou **non** pour revenir au menu.\n",
+      );
       break;
     }
 

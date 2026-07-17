@@ -677,6 +677,44 @@ async function lancerPushCodeApp(
   // power.config.json et le push est relancé automatiquement.
   const scriptPush = [
     `& {`,
+    // Auto-fix préventif AVANT le build : Power Apps Code Apps exigent des chemins relatifs
+    // dans index.html. Sans "base: './'" (Vite) ou "baseHref: './'" (Angular), les bundlers
+    // génèrent des chemins absolus (/assets/index-XXX.css) qui donnent des 404 sur le CDN
+    // powerplatformusercontent.com une fois l'app déployée — même si "power-apps push"
+    // affiche "successfully". Contrairement au patch TS5101 (réactif, sur échec de build),
+    // celui-ci est proactif : le symptôme n'apparaît qu'au runtime côté serveur.
+    // --- Vite (Vue/React) ---
+    `foreach ($viteFile in @('vite.config.ts', 'vite.config.js', 'vite.config.mts', 'vite.config.mjs')) {`,
+    `  if (Test-Path $viteFile) {`,
+    `    $viteContent = Get-Content $viteFile -Raw;`,
+    `    if ($viteContent -notmatch '(?m)(^|\\W)base\\s*:') {`,
+    `      Write-Host "🔧 Patch $viteFile : ajout de base: './' (requis pour Power Apps Code Apps)..." -ForegroundColor Cyan;`,
+    `      $viteContent = $viteContent -replace 'defineConfig\\s*\\(\\s*\\{', "defineConfig({\`n  base: './',";`,
+    `      Set-Content $viteFile -Value $viteContent -Encoding UTF8;`,
+    `      Write-Host "✅ $viteFile patché." -ForegroundColor Green;`,
+    `    }`,
+    `    break`,
+    `  }`,
+    `};`,
+    // --- Angular ---
+    `if (Test-Path 'angular.json') {`,
+    `  try {`,
+    `    $ng = Get-Content 'angular.json' -Raw | ConvertFrom-Json;`,
+    `    $names = @($ng.projects.PSObject.Properties.Name);`,
+    `    if ($names.Count -gt 0) {`,
+    `      $name = $names[0];`,
+    `      $bt = $null;`,
+    `      if ($ng.projects.$name.architect -and $ng.projects.$name.architect.build) { $bt = $ng.projects.$name.architect.build }`,
+    `      elseif ($ng.projects.$name.targets -and $ng.projects.$name.targets.build) { $bt = $ng.projects.$name.targets.build };`,
+    `      if ($bt -and $bt.options -and $bt.options.baseHref -ne './') {`,
+    `        Write-Host "🔧 Patch angular.json : ajout de baseHref: './' (requis pour Power Apps Code Apps)..." -ForegroundColor Cyan;`,
+    `        $bt.options | Add-Member -MemberType NoteProperty -Name baseHref -Value './' -Force;`,
+    `        $ng | ConvertTo-Json -Depth 100 | Set-Content 'angular.json' -Encoding UTF8;`,
+    `        Write-Host "✅ angular.json patché." -ForegroundColor Green;`,
+    `      }`,
+    `    }`,
+    `  } catch { Write-Host "⚠️ angular.json non patchable (JSON invalide ?)." -ForegroundColor Yellow }`,
+    `};`,
     `Write-Host "🔨 Compilation du projet..." -ForegroundColor Cyan;`,
     // Capture de la sortie pour pouvoir détecter TS5101 (baseUrl déprécié en TS 5+) et
     // auto-patcher les tsconfig si besoin. Utile pour les projets scaffoldés avant l'ajout
@@ -844,6 +882,13 @@ try {
             importsToAdd.push("import tailwindcss from '@tailwindcss/vite';");
             vc = vc.replace(/plugins: \\[(vue\\(\\)|react\\(\\))\\]/, 'plugins: [$1, tailwindcss()]');
         }
+        // OBLIGATOIRE pour Power Apps Code Apps : chemins relatifs dans index.html.
+        // Sans "base: './'" Vite génère des chemins absolus (/assets/index-XXX.css) qui ne
+        // résolvent pas côté CDN powerplatformusercontent.com → 404 sur les assets une fois
+        // l'app déployée, même si le push CLI affiche "successfully".
+        if (!/(^|\\W)base\\s*:/.test(vc)) {
+            vc = vc.replace(/defineConfig\\(\\s*\\{/, "defineConfig({\\n  base: './',");
+        }
         if (importsToAdd.length) {
             vc = importsToAdd.join('\\n') + '\\n' + vc;
         }
@@ -915,15 +960,24 @@ try {
     // Angular garde l'approche classique car @angular/cli a un flag --defaults parfait
     descriptionStack =
       "Angular 19 + Angular Router + NgRx Signals + Tailwind CSS v4";
+
+    // Patch angular.json : ajoute baseHref: './' dans le premier projet. Nécessaire pour
+    // Power Apps Code Apps — sans ça, ng build génère un index.html avec des chemins
+    // absolus (/main-XXX.js) qui donnent des 404 sur le CDN powerplatformusercontent.com
+    // une fois l'app déployée. Équivalent Angular du `base: './'` de Vite.
+    // Compatible Angular 17+ (architect) et 18+ (targets, alias moderne).
+    const patchAngularJson = `if (Test-Path 'angular.json') { try { $ng = Get-Content 'angular.json' -Raw | ConvertFrom-Json; $names = @($ng.projects.PSObject.Properties.Name); if ($names.Count -gt 0) { $name = $names[0]; $bt = $null; if ($ng.projects.$name.architect -and $ng.projects.$name.architect.build) { $bt = $ng.projects.$name.architect.build } elseif ($ng.projects.$name.targets -and $ng.projects.$name.targets.build) { $bt = $ng.projects.$name.targets.build }; if ($bt -and $bt.options -and $bt.options.baseHref -ne './') { $bt.options | Add-Member -MemberType NoteProperty -Name baseHref -Value './' -Force; $ng | ConvertTo-Json -Depth 100 | Set-Content 'angular.json' -Encoding UTF8; Write-Host \\"🔧 angular.json patché : baseHref: './' (requis pour Power Apps Code Apps)\\" -ForegroundColor Cyan } } } catch { Write-Host \\"⚠️ angular.json non patchable (JSON invalide ?)\\" -ForegroundColor Yellow } }`;
+
     if (enDansDossier) {
       commandesInit = [
         `npx @angular/cli@latest new "${nomProjet}" --routing --style=css --skip-git --directory . --defaults`,
+        patchAngularJson,
         `npm install -D tailwindcss @tailwindcss/postcss`,
       ];
     } else {
       commandesInit = [
         `npx @angular/cli@latest new "${nomProjet}" --routing --style=css --skip-git --defaults`,
-        `Set-Location "${nomProjet}"; npm install -D tailwindcss @tailwindcss/postcss`,
+        `Set-Location "${nomProjet}"; ${patchAngularJson}; npm install -D tailwindcss @tailwindcss/postcss`,
         `code .`,
       ];
     }
